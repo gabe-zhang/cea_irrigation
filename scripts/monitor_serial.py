@@ -54,8 +54,8 @@ def auto_detect_port() -> str | None:
 
 def main():
     parser = argparse.ArgumentParser(description="Flexible Arduino Serial Monitor for Windows & Raspberry Pi")
-    parser.add_argument("-p", "--port", type=str, default="COM3", help="Serial port (e.g. COM3, /dev/ttyACM0)")
-    parser.add_argument("-b", "--baud", type=int, default=9600, help="Baud rate (default: 9600)")
+    parser.add_argument("-p", "--port", type=str, default=None, help="Serial port (e.g. COM3, /dev/ttyACM0)")
+    parser.add_argument("-b", "--baud", type=int, default=115200, help="Baud rate (default: 9600)")
     parser.add_argument("-l", "--list", action="store_true", help="List all available serial ports and exit")
     parser.add_argument("--raw", action="store_true", help="Print raw lines without timestamp prefix")
     args = parser.parse_args()
