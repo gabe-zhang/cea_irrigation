@@ -21,6 +21,9 @@
 // Configurable active channel count (1 to 5)
 #define NUM_CHANNELS 4
 
+// Enable or disable light sensor on Pin A5 (true: read Pin A5, false: output null)
+#define ENABLE_LIGHT_SENSOR false
+
 #define RELAY_ON HIGH
 #define RELAY_OFF LOW
 
@@ -48,9 +51,6 @@ void broadcastTelemetry() {
     soilValues[i] = analogRead(SOIL_PINS[i]);
   }
 
-  // Read ambient light sensor
-  int lightVal = analogRead(LIGHT_PIN);
-
   // Read DHT22 temperature and humidity
   int chk = DHT.read22(DHT22_PIN);
   if (chk == DHTLIB_OK) {
@@ -68,7 +68,12 @@ void broadcastTelemetry() {
     }
   }
   Serial.print("],\"light\":");
-  Serial.print(lightVal);
+  if (ENABLE_LIGHT_SENSOR) {
+    int lightVal = analogRead(LIGHT_PIN);
+    Serial.print(lightVal);
+  } else {
+    Serial.print("null");
+  }
 
   Serial.print(",\"temp\":");
   if (hasValidDHT) {
