@@ -12,8 +12,8 @@
 Servo panServo;
 Servo tiltServo;
 
-const int PAN_PIN  = A4;
-const int TILT_PIN = A5;
+const int PAN_PIN  = 9;
+const int TILT_PIN = 10;
 
 // Calibrated center positions
 const int PAN_CENTER  = 65;
