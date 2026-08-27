@@ -16,10 +16,10 @@
 
 #include <dht.h>
 
-#define BAUDRATE 115200
+#define BAUDRATE 9600
 
 // Configurable active channel count (1 to 5)
-#define NUM_CHANNELS 1
+#define NUM_CHANNELS 4
 
 // Enable or disable light sensor on Pin A5 (true: read Pin A5, false: output null)
 #define ENABLE_LIGHT_SENSOR false

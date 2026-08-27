@@ -111,7 +111,7 @@ def send_bitmask(ser: serial.Serial, mask: str, expected_len: int) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="CEA Irrigation Controller Interactive CLI")
     parser.add_argument("-p", "--port", type=str, default=None, help="Serial port (e.g. COM3, /dev/ttyACM0)")
-    parser.add_argument("-b", "--baud", type=int, default=115200, help="Baud rate (default: 115200)")
+    parser.add_argument("-b", "--baud", type=int, default=9600, help="Baud rate (default: 9600)")
     parser.add_argument("-l", "--list", action="store_true", help="List available serial ports and exit")
     parser.add_argument("-c", "--channels", type=int, default=None, choices=range(1, 6), help="Override channel count (1-5)")
     args = parser.parse_args()

@@ -46,7 +46,7 @@ def send_bitmask(ser: serial.Serial, states: list[int]):
 
 def main():
     port = sys.argv[1] if len(sys.argv) > 1 else find_arduino_port()
-    baud = 115200
+    baud = 9600
 
     print(f"Connecting to Arduino on {port} at {baud} baud...")
     print("Tip: Make sure the Arduino IDE Serial Monitor is CLOSED.\n")
