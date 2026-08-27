@@ -14,7 +14,7 @@
  *   - "ON" or "ALL ON" or "1"   -> Turns on all 5 relays ("11111")
  */
 
-#define BAUDRATE 115200
+#define BAUDRATE 9600
 #define NUM_RELAYS 5
 
 #define RELAY_ON HIGH
