@@ -129,15 +129,15 @@ unsigned long lastTelemetryTime = 0;
 
 /**
  * Test if an analog pin has an active sensor connected or is open/floating.
- * Uses the AVR internal pullup: an open pin quickly charges to ~1023 (>= 1010).
- * An attached sensor drives the pin, yielding a value < 1010.
+ * Uses the AVR internal pullup: an open pin charges to ~1000-1023 (>= 900).
+ * An attached sensor actively drives the pin, yielding a value < 900 (dry air > 750).
  */
 bool isSoilSensorAttached(int pin) {
   pinMode(pin, INPUT_PULLUP);
-  delayMicroseconds(20);
+  delayMicroseconds(50);
   int pullVal = analogRead(pin);
   pinMode(pin, INPUT); // restore to high-impedance input
-  return (pullVal < 1010);
+  return (pullVal < 900);
 }
 
 /**
