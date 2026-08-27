@@ -6,9 +6,9 @@
  *   - DHT22 Temp & Humidity Sensor (Digital Input): Pin 7
  *   - DS18S20 Soil Temperature Sensor (OneWire Digital): Pin 8
  *   - 0-4 Soil Moisture Sensors (Analog Input): Pins A0, A1, A2, A3
- *   - Pan Servo (Digital Output): Pin A4
- *   - Tilt Servo (Digital Output): Pin A5
- *   - Light Sensor: Temporarily unassigned/disconnected (telemetry outputs null)
+ *   - Pan Servo (Digital Output): Pin 9
+ *   - Tilt Servo (Digital Output): Pin 10
+ *   - Light Sensor (I2C at 0x10): DFRobot VEML7700 Ambient Light Sensor (A4=SDA, A5=SCL)
  * 
  * Servo Range Limits:
  *   - Pan: 0 to 130 deg (Center: 65 deg)
@@ -16,7 +16,7 @@
  * 
  * Communication Protocol (9600 baud):
  *   - Periodic Telemetry (every 1000ms): Tagged CSV row:
- *     soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,null,relays,mask,pan,val,tilt,val
+ *     soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,val,relays,mask,pan,val,tilt,val
  *     Any missing, disconnected, or unreadable sensor outputs 'null'.
  *   - Control Commands:
  *     - 'p <0-130>' -> Set pan angle (e.g. 'p 65', 'p 0')
@@ -28,6 +28,8 @@
 #include <Servo.h>
 #include <OneWire.h>
 #include <dht.h>
+#include <Wire.h>
+#include <DFRobot_VEML7700.h>
 
 #define BAUDRATE 9600
 
@@ -43,8 +45,8 @@ const int RELAY_PINS[NUM_RELAYS] = {2, 3, 4, 5};
 const int SOIL_PINS[NUM_SOIL]    = {A0, A1, A2, A3};
 #define DHT22_PIN   7
 #define DS18S20_PIN 8
-#define PAN_PIN     A4
-#define TILT_PIN    A5
+#define PAN_PIN     9
+#define TILT_PIN    10
 
 // Servo Safety Limits & Centers
 const int PAN_MIN     = 0;
@@ -108,6 +110,12 @@ dht DHT;
 double lastValidTemp = 0.0;
 double lastValidHumi = 0.0;
 bool hasValidDHT     = false;
+
+// Ambient Light Sensor State (DFRobot VEML7700 I2C at 0x10)
+DFRobot_VEML7700 als;
+float lastValidLux          = 0.0;
+bool hasValidLight          = false;
+bool lightSensorInitialized = false;
 
 // OneWire DS18S20 Non-blocking State Machine
 OneWire ds(DS18S20_PIN);
@@ -235,8 +243,34 @@ void updateDHT() {
 }
 
 /**
+ * Read ambient light from VEML7700 I2C sensor.
+ * Gracefully handles disconnected or unresponsive sensor without hanging.
+ */
+void updateLight() {
+  Wire.beginTransmission(0x10);
+  if (Wire.endTransmission() != 0) {
+    hasValidLight = false;
+    lightSensorInitialized = false;
+    return;
+  }
+
+  if (!lightSensorInitialized) {
+    als.begin();
+    lightSensorInitialized = true;
+  }
+
+  float lux = 0.0;
+  if (als.getALSLux(lux) == DFRobot_VEML7700::STATUS_OK) {
+    lastValidLux = lux;
+    hasValidLight = true;
+  } else {
+    hasValidLight = false;
+  }
+}
+
+/**
  * Output tagged CSV telemetry row:
- * soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,null,relays,mask,pan,val,tilt,val
+ * soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,val,relays,mask,pan,val,tilt,val
  */
 void broadcastTelemetry() {
   // 1-4. Soil moisture channels with 'soil' tag
@@ -278,8 +312,14 @@ void broadcastTelemetry() {
   }
   Serial.print(",");
 
-  // 8. Light Sensor (currently unassigned/null)
-  Serial.print("light,null,");
+  // 8. Light Sensor
+  Serial.print("light,");
+  if (hasValidLight) {
+    Serial.print(lastValidLux, 1);
+  } else {
+    Serial.print("null");
+  }
+  Serial.print(",");
 
   // 9. Relays Bitmask
   Serial.print("relays,");
@@ -411,9 +451,13 @@ void setup() {
   // Initial read delay for sensor stabilization
   delay(500);
 
+  // Initialize I2C bus for sensors
+  Wire.begin();
+
   // Initial sensor sampling
   updateDHT();
   updateSoilTemp();
+  updateLight();
 
   // Initial telemetry broadcast on boot
   broadcastTelemetry();
@@ -427,11 +471,12 @@ void loop() {
   // Check and detach servos when idle to eliminate interrupt jitter
   checkServoDetach();
 
-  // Periodic telemetry broadcast and DHT reading
+  // Periodic telemetry broadcast and sensor sampling
   unsigned long currentMillis = millis();
   if (currentMillis - lastTelemetryTime >= TELEMETRY_INTERVAL) {
     lastTelemetryTime = currentMillis;
     updateDHT();
+    updateLight();
     broadcastTelemetry();
   }
 

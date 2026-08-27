@@ -159,8 +159,27 @@ def test_tagged_csv_all_null():
     print("[PASS] test_tagged_csv_all_null")
 
 
+def test_tagged_csv_with_light():
+    raw = "soil,450,430,460,440,soil_temp,21.5,temp,24.2,humi,55.0,light,350.5,relays,0000,pan,65,tilt,60"
+    data = parse_telemetry_line(raw)
+    assert data is not None, "Failed to parse tagged telemetry with light"
+    assert data["soil"] == [450, 430, 460, 440]
+    assert data["soil_temp"] == 21.5
+    assert data["temp"] == 24.2
+    assert data["humidity"] == 55.0
+    assert data["light"] == 350
+    assert data["relays"] == "0000"
+    assert data["pan"] == 65
+    assert data["tilt"] == 60
+
+    formatted = format_telemetry_compact(data)
+    assert "Light: 350" in formatted
+    print("[PASS] test_tagged_csv_with_light")
+
+
 if __name__ == "__main__":
     test_tagged_csv_full()
+    test_tagged_csv_with_light()
     test_tagged_csv_partial_null()
     test_tagged_csv_all_null()
     test_full_telemetry()
@@ -168,5 +187,5 @@ if __name__ == "__main__":
     test_all_sensors_missing()
     test_ignore_headers_and_acks()
     test_bounds()
-    print("\nAll 8 test suites passed successfully!")
+    print("\nAll 9 test suites passed successfully!")
 
