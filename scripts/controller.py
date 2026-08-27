@@ -1,26 +1,35 @@
 """CEA Irrigation Controller Interactive CLI.
 
 Connects over Serial (Windows COMx or Linux/Raspberry Pi /dev/tty*)
-to the Arduino controller firmware to monitor sensors and control pump relays.
+to the Arduino controller firmware to monitor sensors and control pump relays
+and pan/tilt servos.
 
 Features:
-  - Dynamically detects number of active channels (1 to 5 pumps & soil sensors).
-  - Explicit input buffer clearing to guarantee fresh telemetry readings.
-  - Interactive shell for bitmask dispatch (e.g. "0001", "1111", "0000") and live telemetry.
+  - Robust CSV telemetry parser that gracefully handles missing sensors ('null' values).
+  - Displays Soil Moisture (up to 4 channels), Soil Temp, Air Temp & Humidity, Relays, Pan & Tilt.
+  - Interactive shell supporting:
+      * Relay bitmasks (e.g. '0000', '1000', '01')
+      * Pan angle commands (e.g. 'p 65', 'p 0', 'p 130')
+      * Tilt angle commands (e.g. 't 60', 't 45', 't 90')
+      * Servo re-centering ('c')
+      * Clean exit ('exit', 'q') with relay shutoff and servo centering.
 
 Usage:
     uv run python scripts/controller.py
-    uv run python scripts/controller.py --port COM3 --baud 115200
+    uv run python scripts/controller.py --port COM3 --baud 9600
 """
 
 import argparse
-import json
 import sys
 import threading
 import time
 from datetime import datetime
 import serial
 import serial.tools.list_ports
+
+# Hardware safety bounds
+PAN_MIN, PAN_MAX = 0, 130
+TILT_MIN, TILT_MAX = 0, 90
 
 
 def find_arduino_port() -> str | None:
@@ -57,19 +66,168 @@ def list_ports():
     print("------------------------------\n")
 
 
-def parse_telemetry_line(raw_line: str) -> dict | None:
-    """Attempt to parse a JSON telemetry string from Arduino."""
-    line = raw_line.strip()
-    if not (line.startswith("{") and line.endswith("}")):
+def _safe_float(val: str) -> float | None:
+    """Convert string to float, treating 'null', 'nan', or empty as None."""
+    s = val.strip().lower()
+    if not s or s in ("null", "none", "nan"):
         return None
     try:
-        return json.loads(line)
-    except json.JSONDecodeError:
+        return float(s)
+    except ValueError:
         return None
+
+
+def _safe_int(val: str) -> int | None:
+    """Convert string to int, treating 'null', 'nan', or empty as None."""
+    s = val.strip().lower()
+    if not s or s in ("null", "none", "nan"):
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+def parse_telemetry_line(raw_line: str) -> dict | None:
+    """Parse CSV telemetry string into a dictionary.
+
+    Supports:
+      1. Tagged CSV (Self-describing):
+         soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,val,relays,mask,pan,val,tilt,val
+      2. Positional CSV (Fallback):
+         s1,s2,s3,s4,soil_temp,temp,humidity,light,relays,pan,tilt
+
+    Returns None if line is a header, ACK/ERR/FORMAT message, or corrupt.
+    """
+    line = raw_line.strip()
+    if not line:
+        return None
+
+    # Ignore headers or system status lines
+    line_lower = line.lower()
+    if line_lower.startswith(("soil1,", "format:", "status:", "ack:", "err:")):
+        return None
+
+    tokens = [t.strip() for t in line.split(",")]
+
+    # Case 1: Tagged CSV format
+    if "soil" in [t.lower() for t in tokens]:
+        data = {
+            "soil": [None, None, None, None],
+            "soil_temp": None,
+            "temp": None,
+            "humidity": None,
+            "light": None,
+            "relays": "0000",
+            "pan": 65,
+            "tilt": 60,
+        }
+        try:
+            i = 0
+            n = len(tokens)
+            while i < n:
+                tag = tokens[i].lower()
+                if tag == "soil":
+                    soil_vals = []
+                    j = i + 1
+                    while j < n and len(soil_vals) < 4:
+                        val_str = tokens[j]
+                        if val_str.lower() in ("soil_temp", "temp", "humi", "light", "relays", "pan", "tilt"):
+                            break
+                        soil_vals.append(_safe_int(val_str))
+                        j += 1
+                    while len(soil_vals) < 4:
+                        soil_vals.append(None)
+                    data["soil"] = soil_vals
+                    i = j
+                    continue
+                elif tag == "soil_temp" and i + 1 < n:
+                    data["soil_temp"] = _safe_float(tokens[i + 1])
+                    i += 2
+                elif tag in ("temp", "air_temp") and i + 1 < n:
+                    data["temp"] = _safe_float(tokens[i + 1])
+                    i += 2
+                elif tag in ("humi", "humidity") and i + 1 < n:
+                    data["humidity"] = _safe_float(tokens[i + 1])
+                    i += 2
+                elif tag == "light" and i + 1 < n:
+                    data["light"] = _safe_int(tokens[i + 1])
+                    i += 2
+                elif tag == "relays" and i + 1 < n:
+                    data["relays"] = tokens[i + 1].strip()
+                    i += 2
+                elif tag == "pan" and i + 1 < n:
+                    data["pan"] = _safe_int(tokens[i + 1])
+                    i += 2
+                elif tag == "tilt" and i + 1 < n:
+                    data["tilt"] = _safe_int(tokens[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            return data
+        except Exception:
+            return None
+
+    # Case 2: Positional CSV (11 columns fallback)
+    if len(tokens) >= 11 and not any(t.lower() in ("relays", "soil1") for t in tokens):
+        try:
+            return {
+                "soil": [_safe_int(t) for t in tokens[0:4]],
+                "soil_temp": _safe_float(tokens[4]),
+                "temp": _safe_float(tokens[5]),
+                "humidity": _safe_float(tokens[6]),
+                "light": _safe_int(tokens[7]),
+                "relays": tokens[8].strip(),
+                "pan": _safe_int(tokens[9]),
+                "tilt": _safe_int(tokens[10]),
+            }
+        except Exception:
+            return None
+
+    return None
+
+
+def format_telemetry_compact(data: dict) -> str:
+    """Format parsed telemetry dictionary into a clean single-line summary."""
+    now = datetime.now().strftime("%H:%M:%S")
+
+    # Soil moisture formatting
+    soil_list = data.get("soil", [])
+    soil_strs = [f"{v:3d}" if v is not None else "---" for v in soil_list]
+    soil_repr = "[" + ", ".join(soil_strs) + "]"
+
+    # Soil temp
+    st = data.get("soil_temp")
+    soil_temp_str = f"{st:.1f}°C" if st is not None else "N/A"
+
+    # Air Temp & Humidity
+    t = data.get("temp")
+    h = data.get("humidity")
+    air_temp_str = f"{t:.1f}°C" if t is not None else "N/A"
+    air_humi_str = f"{h:.1f}%" if h is not None else "N/A"
+
+    # Light
+    light_val = data.get("light")
+    light_str = str(light_val) if light_val is not None else "N/A"
+
+    # Relays
+    relays_str = data.get("relays", "N/A")
+
+    # Pan & Tilt
+    pan_val = data.get("pan")
+    tilt_val = data.get("tilt")
+    pan_str = f"{pan_val}°" if pan_val is not None else "N/A"
+    tilt_str = f"{tilt_val}°" if tilt_val is not None else "N/A"
+
+    return (
+        f"[{now}] Soil: {soil_repr:<19} | SoilTemp: {soil_temp_str:<6} | "
+        f"Air: {air_temp_str:<6} {air_humi_str:<6} | Light: {light_str:<3} | "
+        f"Relays: {relays_str:<4} | Pan: {pan_str:<4} | Tilt: {tilt_str:<3}"
+    )
 
 
 def read_fresh_telemetry(ser: serial.Serial, timeout_sec: float = 3.0) -> dict | None:
-    """Flush input buffer to discard stale readings and fetch the latest fresh telemetry frame."""
+    """Flush input buffer and wait for the latest fresh CSV telemetry frame."""
     ser.reset_input_buffer()
     start_time = time.time()
     while (time.time() - start_time) < timeout_sec:
@@ -78,34 +236,20 @@ def read_fresh_telemetry(ser: serial.Serial, timeout_sec: float = 3.0) -> dict |
             continue
         line_str = line_bytes.decode("utf-8", errors="replace").strip()
         data = parse_telemetry_line(line_str)
-        if data and "soil" in data:
+        if data is not None:
             return data
     return None
 
 
-def format_telemetry_compact(data: dict) -> str:
-    """Format JSON telemetry into a single-line summary."""
-    now = datetime.now().strftime("%H:%M:%S")
-    soil_vals = data.get("soil", [])
-    soil_str = "[" + ", ".join(f"{v:3d}" if isinstance(v, int) else str(v) for v in soil_vals) + "]"
-    temp_val = data.get("temp")
-    humi_val = data.get("humidity")
-    temp_str = f"{temp_val:.1f}C" if isinstance(temp_val, (int, float)) else "N/A"
-    humi_str = f"{humi_val:.1f}%" if isinstance(humi_val, (int, float)) else "N/A"
-    light_val = data.get("light", "N/A")
-    relays_str = data.get("relays", "")
-    return f"[{now}] Light: {str(light_val):<4} | Temp: {temp_str:<6} | RH: {humi_str:<6} | Soil: {soil_str:<18} | Relays: {relays_str}"
-
-
-def send_bitmask(ser: serial.Serial, mask: str, expected_len: int) -> bool:
-    """Send a bitmask to Arduino and flush write buffer."""
-    if len(mask) != expected_len or not all(c in "01" for c in mask):
-        print(f"[Error] Invalid bitmask '{mask}'. Expected {expected_len} digits of 0 or 1.")
+def send_command(ser: serial.Serial, cmd: str) -> bool:
+    """Send a command line to Arduino and flush write buffer."""
+    try:
+        ser.write((cmd.strip() + "\n").encode("utf-8"))
+        ser.flush()
+        return True
+    except Exception as e:
+        print(f"[Serial Write Error] {e}")
         return False
-
-    ser.write((mask + "\n").encode("utf-8"))
-    ser.flush()
-    return True
 
 
 def main():
@@ -113,7 +257,6 @@ def main():
     parser.add_argument("-p", "--port", type=str, default=None, help="Serial port (e.g. COM3, /dev/ttyACM0)")
     parser.add_argument("-b", "--baud", type=int, default=9600, help="Baud rate (default: 9600)")
     parser.add_argument("-l", "--list", action="store_true", help="List available serial ports and exit")
-    parser.add_argument("-c", "--channels", type=int, default=None, choices=range(1, 6), help="Override channel count (1-5)")
     args = parser.parse_args()
 
     if args.list:
@@ -133,28 +276,25 @@ def main():
         ser.reset_input_buffer()
     except serial.SerialException as e:
         print(f"[Error] Failed to open {port}: {e}")
-        print("Tip: Make sure the Arduino IDE Serial Monitor or other serial terminals are closed.")
+        print("Tip: Make sure the Arduino IDE Serial Monitor or other terminals are closed.")
         return
 
     print("Fetching initial telemetry...")
     initial_data = read_fresh_telemetry(ser, timeout_sec=4.0)
-
-    if initial_data and "soil" in initial_data:
-        num_channels = args.channels or len(initial_data["soil"])
-        print(f"--> Connected! Detected {num_channels} active channels.")
-        print(f"--> Initial Reading: {format_telemetry_compact(initial_data)}")
+    if initial_data:
+        print(f"--> Connected! Initial Reading:\n    {format_telemetry_compact(initial_data)}")
     else:
-        num_channels = args.channels or 4
-        print(f"--> Connected! (Defaulting to {num_channels} channels)")
+        print("--> Connected! (Waiting for periodic telemetry broadcast...)")
 
-    zero_mask = "0" * num_channels
-
-    print("=" * 63)
-    print(f"     CEA IRRIGATION CONTROLLER INTERACTIVE SHELL ({num_channels} CHANNELS)")
-    print("=" * 63)
-    print(f"  * Send Bitmask:  Type {num_channels} digits (e.g. '{'0' * (num_channels-1) + '1'}', '{'1' * num_channels}', '{zero_mask}')")
-    print(f"  * Exit:          Type 'exit' / 'q' (turns off all relays and exits)")
-    print("=" * 63 + "\n")
+    print("=" * 68)
+    print("               CEA IRRIGATION CONTROLLER INTERACTIVE SHELL")
+    print("=" * 68)
+    print("  * Relays Bitmask: Type 1-4 digits (e.g. '0000', '1000', '1111')")
+    print("  * Pan Control:    'p <0-130>'    (e.g. 'p 65', 'p 0', 'p 130')")
+    print("  * Tilt Control:   't <0-90>'     (e.g. 't 60', 't 45', 't 90')")
+    print("  * Re-center:      'c'            (Resets Pan 65, Tilt 60)")
+    print("  * Exit:           'exit' / 'q'   (Turns off relays, centers servos, exits)")
+    print("=" * 68 + "\n")
 
     stop_event = threading.Event()
 
@@ -166,9 +306,10 @@ def main():
                     if line_bytes:
                         line_str = line_bytes.decode("utf-8", errors="replace").strip()
                         data = parse_telemetry_line(line_str)
-                        if data and "soil" in data:
+                        if data is not None:
                             print(f"\n{format_telemetry_compact(data)}\n> ", end="", flush=True)
                         elif line_str:
+                            # Print ACKs, headers, and status messages cleanly
                             print(f"\n[Arduino] {line_str}\n> ", end="", flush=True)
                 else:
                     time.sleep(0.05)
@@ -180,32 +321,77 @@ def main():
 
     try:
         while True:
-            cmd = input("> ").strip().lower()
+            cmd = input("> ").strip()
             if not cmd:
                 continue
 
-            if cmd in ("exit", "quit", "q"):
-                print("Turning off all relays before exit...")
-                send_bitmask(ser, zero_mask, num_channels)
+            cmd_lower = cmd.lower()
+
+            # Exit command
+            if cmd_lower in ("exit", "quit", "q"):
+                print("Turning off relays and centering servos before exit...")
+                send_command(ser, "0000")
+                time.sleep(0.1)
+                send_command(ser, "c")
                 time.sleep(0.3)
                 break
 
-            if len(cmd) == num_channels and all(c in "01" for c in cmd):
-                send_bitmask(ser, cmd, num_channels)
+            # Center command
+            if cmd_lower == "c":
+                send_command(ser, "c")
                 continue
 
-            print(f"[Warning] Invalid input '{cmd}'. Please enter a {num_channels}-digit bitmask (e.g. '{zero_mask}') or 'exit'.")
+            # Pan command ('p <angle>' or 'P <angle>')
+            if cmd_lower.startswith("p"):
+                parts = cmd_lower.split()
+                if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                    angle = int(parts[1])
+                    if angle < PAN_MIN or angle > PAN_MAX:
+                        print(f"[Warning] Pan angle {angle}° clamped to safety bounds [{PAN_MIN}, {PAN_MAX}].")
+                        angle = max(PAN_MIN, min(PAN_MAX, angle))
+                    send_command(ser, f"p {angle}")
+                    continue
+                else:
+                    print("[Error] Invalid pan command. Use 'p <0-130>' (e.g. 'p 65').")
+                    continue
+
+            # Tilt command ('t <angle>' or 'T <angle>')
+            if cmd_lower.startswith("t"):
+                parts = cmd_lower.split()
+                if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                    angle = int(parts[1])
+                    if angle < TILT_MIN or angle > TILT_MAX:
+                        print(f"[Warning] Tilt angle {angle}° clamped to safety bounds [{TILT_MIN}, {TILT_MAX}].")
+                        angle = max(TILT_MIN, min(TILT_MAX, angle))
+                    send_command(ser, f"t {angle}")
+                    continue
+                else:
+                    print("[Error] Invalid tilt command. Use 't <0-90>' (e.g. 't 60').")
+                    continue
+
+            # Bitmask command: 1 to 4 digits of '0' and '1'
+            if 1 <= len(cmd) <= 4 and all(c in "01" for c in cmd):
+                send_command(ser, cmd)
+                continue
+
+            print(f"[Warning] Unknown input '{cmd}'.")
+            print("  Allowed: 'p <0-130>', 't <0-90>', 'c', bitmask (e.g. '0000'), or 'exit'.")
 
     except (KeyboardInterrupt, EOFError):
-        print("\nInterrupted. Shutting down all pumps...")
+        print("\nInterrupted. Turning off relays and centering servos...")
         try:
-            send_bitmask(ser, zero_mask, num_channels)
-            time.sleep(0.3)
+            send_command(ser, "0000")
+            time.sleep(0.1)
+            send_command(ser, "c")
+            time.sleep(0.2)
         except Exception:
             pass
     finally:
         stop_event.set()
-        ser.close()
+        try:
+            ser.close()
+        except Exception:
+            pass
         print("Serial connection closed. Exited cleanly.")
 
 
