@@ -1,3 +1,12 @@
+/*
+ * Pan & Tilt Calibration: pi50
+ * For absolute angle:
+ *   Centered: p 65, t 60
+ *   Range:
+ *     p +- 65 (0 - 130)
+ *     t 0 - 90
+ */
+
 #include <Servo.h>
 
 Servo panServo;
@@ -11,7 +20,7 @@ const int PAN_CENTER  = 65;
 const int TILT_CENTER = 60;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   
   panServo.attach(PAN_PIN);
   tiltServo.attach(TILT_PIN);
