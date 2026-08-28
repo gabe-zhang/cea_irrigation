@@ -183,64 +183,103 @@ def find_arduino_port() -> str | None:
 
 
 class PlotWindow:
-    """Dynamic Matplotlib window displaying 60s soil moisture telemetry."""
+    """Dynamic Matplotlib window displaying 60s soil moisture, temperatures, and humidity telemetry."""
 
-    def __init__(self, master: tk.Tk, get_moistures_fn) -> None:
+    def __init__(self, master: tk.Tk, get_telemetry_fn) -> None:
         self.master = master
-        self.get_moistures = get_moistures_fn
+        self.get_telemetry = get_telemetry_fn
         self.window: tk.Toplevel | None = None
         self.ani: animation.FuncAnimation | None = None
         self.max_ch = 4
         self.colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd"]
         self.xdata: list[float] = []
-        self.ydata: list[list[float]] = [[] for _ in range(self.max_ch)]
+        self.ydata_moist: list[list[float]] = [[] for _ in range(self.max_ch)]
+        self.ydata_soil_temp: list[float] = []
+        self.ydata_temp: list[float] = []
+        self.ydata_rh: list[float] = []
 
-        self.fig = Figure(figsize=(7.5, 5.2), dpi=100)
-        self.ax = self.fig.add_subplot(111)
-        self.lines, self.labels = [], []
-        for c in self.colors:
-            (line,) = self.ax.plot([], [], color=c, linewidth=2.0)
-            txt = self.ax.text(0, 0, "", color=c, fontsize=9.5, fontweight="bold", va="center")
-            self.lines.append(line)
-            self.labels.append(txt)
+        self.fig = Figure(figsize=(15.0, 10.5), dpi=100)
+        self.fig.suptitle("Soil Moisture & Environmental Telemetry (Last 60s)", fontsize=24, fontweight="bold")
 
-        self.ax.set_ylim(0, 100)
-        self.ax.set_xlim(0, 68)
-        self.ax.set_xticks([0, 10, 20, 30, 40, 50, 60])
-        self.ax.yaxis.tick_right()
-        self.ax.yaxis.set_label_position("right")
-        self.fig.suptitle("Soil Moisture Telemetry (Last 60s)", fontsize=13, fontweight="bold")
-        self.ax.set_xlabel("Time (s)", fontsize=11)
-        self.ax.set_ylabel("Soil Moisture (%)", fontsize=11)
-        self.ax.grid(True, linestyle="--", alpha=0.6)
-        self.fig.tight_layout()
+        # Top Plot: Soil Moisture (0-100%)
+        self.ax_moist = self.fig.add_subplot(2, 1, 1)
+        self.lines_moist = []
+        for i, c in enumerate(self.colors):
+            (line,) = self.ax_moist.plot([], [], color=c, linewidth=3.6, label=f"S{i+1}")
+            self.lines_moist.append(line)
 
-    def _update(self, data: tuple[float, list[float | None]]):
-        x, moistures = data
+        self.ax_moist.set_ylim(0, 100)
+        self.ax_moist.set_xlim(0, 60)
+        self.ax_moist.set_xticks([0, 10, 20, 30, 40, 50, 60])
+        self.ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
+        self.ax_moist.tick_params(axis="both", labelsize=18)
+        self.ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
+        self.ax_moist.legend(loc="upper left", fontsize=18, ncol=4, framealpha=0.92)
+
+        # Bottom Plot: Temperatures (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
+        self.ax_temp = self.fig.add_subplot(2, 1, 2, sharex=self.ax_moist)
+        self.ax_rh = self.ax_temp.twinx()
+
+        (self.line_temp,) = self.ax_temp.plot([], [], color="#d62728", linewidth=3.6, label="Air Temp (°C)")
+        (self.line_soil_temp,) = self.ax_temp.plot(
+            [], [], color="#d95f02", linewidth=3.6, linestyle="--", label="Soil Temp (°C)"
+        )
+        (self.line_rh,) = self.ax_rh.plot([], [], color="#00838f", linewidth=3.6, label="RH (%)")
+
+        self.ax_temp.set_ylim(0, 50)
+        self.ax_temp.set_xlim(0, 60)
+        self.ax_temp.set_xticks([0, 10, 20, 30, 40, 50, 60])
+        self.ax_temp.set_xlabel("Time (s)", fontsize=20, fontweight="bold")
+        self.ax_temp.set_ylabel("Temperature (°C)", fontsize=20, fontweight="bold", color="#d62728")
+        self.ax_temp.tick_params(axis="x", labelsize=18)
+        self.ax_temp.tick_params(axis="y", labelcolor="#d62728", labelsize=18)
+        self.ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
+
+        self.ax_rh.set_ylim(0, 100)
+        self.ax_rh.set_ylabel("Relative Humidity (%)", fontsize=20, fontweight="bold", color="#00838f")
+        self.ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=18)
+
+        # Combined Legend for Temperatures and RH
+        self.ax_temp.legend(
+            [self.line_temp, self.line_soil_temp, self.line_rh],
+            ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"],
+            loc="upper left",
+            fontsize=18,
+            ncol=3,
+            framealpha=0.92,
+        )
+
+        self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
+        self.fig.subplots_adjust(hspace=0.35)
+
+    def _update(self, data: tuple[float, list[float | None], float | None, float | None, float | None]):
+        x, moistures, soil_temp, temp, rh = data
         if not self.xdata or x < self.xdata[-1] or x == 0:
             self.xdata = [x]
-            self.ydata = [[m if m is not None else np.nan] for m in (moistures[:self.max_ch] + [None] * max(0, self.max_ch - len(moistures)))]
+            self.ydata_moist = [
+                [m if m is not None else np.nan]
+                for m in (moistures[:self.max_ch] + [None] * max(0, self.max_ch - len(moistures)))
+            ]
+            self.ydata_soil_temp = [soil_temp if soil_temp is not None else np.nan]
+            self.ydata_temp = [temp if temp is not None else np.nan]
+            self.ydata_rh = [rh if rh is not None else np.nan]
         else:
             self.xdata.append(x)
             for i in range(self.max_ch):
                 m = moistures[i] if i < len(moistures) else None
-                self.ydata[i].append(m if m is not None else np.nan)
+                self.ydata_moist[i].append(m if m is not None else np.nan)
+            self.ydata_soil_temp.append(soil_temp if soil_temp is not None else np.nan)
+            self.ydata_temp.append(temp if temp is not None else np.nan)
+            self.ydata_rh.append(rh if rh is not None else np.nan)
 
         for i in range(self.max_ch):
-            latest = self.ydata[i][-1] if self.ydata[i] else np.nan
-            if not np.isnan(latest):
-                self.lines[i].set_data(self.xdata, self.ydata[i])
-                self.lines[i].set_visible(True)
-                self.labels[i].set_position((min(x + 0.6, 67.5), latest))
-                self.labels[i].set_text(f" S{i+1}: {latest:.1f}%")
-                self.labels[i].set_visible(True)
-            else:
-                self.lines[i].set_visible(not all(np.isnan(v) for v in self.ydata[i]))
-                if self.lines[i].get_visible():
-                    self.lines[i].set_data(self.xdata, self.ydata[i])
-                self.labels[i].set_visible(False)
+            self.lines_moist[i].set_data(self.xdata, self.ydata_moist[i])
 
-        return tuple(self.lines) + tuple(self.labels)
+        self.line_temp.set_data(self.xdata, self.ydata_temp)
+        self.line_soil_temp.set_data(self.xdata, self.ydata_soil_temp)
+        self.line_rh.set_data(self.xdata, self.ydata_rh)
+
+        return tuple(self.lines_moist) + (self.line_temp, self.line_soil_temp, self.line_rh)
 
     def _gen(self):
         t0 = time.time()
@@ -248,18 +287,39 @@ class PlotWindow:
             elapsed = time.time() - t0
             if elapsed >= 60.0:
                 t0, elapsed = time.time(), 0.0
-            yield round(elapsed, 1), self.get_moistures()
+
+            raw_data = self.get_telemetry()
+            if isinstance(raw_data, dict):
+                moistures = raw_data.get("moisture_pct", [])
+                soil_temp = raw_data.get("soil_temp")
+                temp = raw_data.get("temp")
+                rh = raw_data.get("humidity")
+            elif isinstance(raw_data, (list, tuple)):
+                moistures = list(raw_data)
+                soil_temp, temp, rh = None, None, None
+            else:
+                moistures, soil_temp, temp, rh = [], None, None, None
+
+            yield round(elapsed, 1), moistures, soil_temp, temp, rh
             time.sleep(0.5)
 
     def toggle(self, show: bool, on_close=None) -> None:
         if show:
             if self.window is None or not tk.Toplevel.winfo_exists(self.window):
                 self.window = tk.Toplevel(self.master)
-                self.window.title("Soil Moisture Telemetry (Last 60s)")
-                self.window.geometry("750x550")
+                self.window.title("Soil Moisture & Environmental Telemetry (Last 60s)")
+                scr_w = self.master.winfo_screenwidth()
+                scr_h = self.master.winfo_screenheight()
+                win_w = max(1100, int(scr_w * 0.94))
+                win_h = max(800, int(scr_h * 0.93))
+                pos_x = max(0, int((scr_w - win_w) / 2))
+                pos_y = max(0, int((scr_h - win_h) / 2))
+                self.window.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
                 self.window.protocol("WM_DELETE_WINDOW", lambda: (self.toggle(False), on_close and on_close()))
                 FigureCanvasTkAgg(self.fig, master=self.window).get_tk_widget().pack(fill=tk.BOTH, expand=True)
-                self.ani = animation.FuncAnimation(self.fig, self._update, self._gen, interval=500, cache_frame_data=False)
+                self.ani = animation.FuncAnimation(
+                    self.fig, self._update, self._gen, interval=500, cache_frame_data=False
+                )
             else:
                 self.window.deiconify()
                 self.window.lift()
@@ -294,6 +354,7 @@ class MainWindow(tk.Tk):
             "relays": "0000", "pan": PAN_CENTER, "tilt": TILT_CENTER
         }
         self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
+        self._last_servo_cmd = 0.0  # monotonic timestamp for servo command throttling
         self._repeat_job: str | None = None
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.flag_capture = False
@@ -359,7 +420,7 @@ class MainWindow(tk.Tk):
 
         self._build_gimbal_panel(right_frame, margin_w, y_pos(5), self.scr_h - y_pos(5) - gap_y)
 
-        self.plotter = PlotWindow(self, lambda: self.telemetry.get("moisture_pct", []))
+        self.plotter = PlotWindow(self, lambda: self.telemetry)
         self._build_menu()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -410,11 +471,8 @@ class MainWindow(tk.Tk):
             ("btn_tilt_down", "▼", 2, 1, lambda: self.nudge_tilt(GIMBAL_STEP)),
         ]
         for attr, text, r, c, action in dpad:
-            btn = tk.Button(self.gimbal_frame, text=text, **gcfg)
+            btn = tk.Button(self.gimbal_frame, text=text, command=action, **gcfg)
             btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=2)
-            btn.bind("<ButtonPress-1>", lambda e, a=action: self._start_repeat(a))
-            btn.bind("<ButtonRelease-1>", self._stop_repeat)
-            btn.bind("<Leave>", self._stop_repeat)
             setattr(self, attr, btn)
 
         self.btn_center = tk.Button(
@@ -486,9 +544,13 @@ class MainWindow(tk.Tk):
     def send_command(self, cmd: str) -> None:
         if self.ser and self.ser.is_open:
             try:
+                t0 = time.monotonic()
                 with self.serial_lock:
+                    t1 = time.monotonic()
                     self.ser.write((cmd.strip() + "\n").encode("utf-8"))
                     self.ser.flush()
+                    t2 = time.monotonic()
+                print(f"[CMD] '{cmd.strip()}' lock={1000*(t1-t0):.0f}ms write={1000*(t2-t1):.0f}ms")
             except Exception as e:
                 print(f"[Serial] Command error: {e}")
 
@@ -499,9 +561,9 @@ class MainWindow(tk.Tk):
 
         def _repeat_step():
             action_fn()
-            self._repeat_job = self.after(120, _repeat_step)
+            self._repeat_job = self.after(350, _repeat_step)
 
-        self._repeat_job = self.after(250, _repeat_step)
+        self._repeat_job = self.after(400, _repeat_step)
 
     def _stop_repeat(self, event=None) -> None:
         """Cancel active press-and-hold repeat timer."""
@@ -512,20 +574,39 @@ class MainWindow(tk.Tk):
                 pass
             self._repeat_job = None
 
+    def _servo_throttled(self) -> bool:
+        """Return True (and skip) if a servo command was sent too recently."""
+        now = time.monotonic()
+        if now - self._last_servo_cmd < 0.50:
+            return True
+        self._last_servo_cmd = now
+        return False
+
     def nudge_pan(self, delta: int) -> None:
+        if self._servo_throttled():
+            print(f"[THROTTLE] pan dropped")
+            return
         new_pan = max(PAN_MIN, min(PAN_MAX, self.current_pan + delta))
         self.current_pan = new_pan
         self.send_command(f"p {new_pan}")
 
     def nudge_tilt(self, delta: int) -> None:
+        if self._servo_throttled():
+            print(f"[THROTTLE] tilt dropped")
+            return
         new_tilt = max(TILT_MIN, min(TILT_MAX, self.current_tilt + delta))
         self.current_tilt = new_tilt
         self.send_command(f"t {new_tilt}")
 
     def recenter_gimbal(self) -> None:
+        if self._servo_throttled():
+            print(f"[THROTTLE] center dropped")
+            return
         self._stop_repeat()
-        self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
-        self.send_command("c")
+        self.current_pan = PAN_CENTER
+        self.send_command(f"p {PAN_CENTER}")
+        self.current_tilt = TILT_CENTER
+        self.after(150, lambda: self.send_command(f"t {TILT_CENTER}"))
 
     def _init_serial(self) -> None:
         port = find_arduino_port()
@@ -584,25 +665,29 @@ class MainWindow(tk.Tk):
 
     def _serial_reader(self) -> None:
         last_log = 0.0
+        rx_buf = ""
         while not self.stop_threads.is_set():
             if self.ser and self.ser.is_open:
                 try:
-                    with self.serial_lock:
-                        waiting = self.ser.in_waiting
-                    if waiting:
-                        with self.serial_lock:
-                            line = self.ser.readline().decode("utf-8", errors="replace").strip()
-                        data = parse_telemetry_line(line)
-                        if data:
-                            soil = data.get("soil", [])
-                            moist = [raw_to_moisture(v, i) for i, v in enumerate(soil)]
-                            self.telemetry = {**data, "moisture_pct": moist}
-                            if soil and len(soil) != len(self.water_vars):
-                                self.after(0, lambda n=len(soil): self.rebuild_relays(n))
-                            self.after(0, lambda d=data, m=moist: self._update_telemetry_ui(d, m))
-                            if time.time() - last_log >= 10.0:
-                                self._log_telemetry_csv(data, moist)
-                                last_log = time.time()
+                    n = self.ser.in_waiting
+                    if n:
+                        rx_buf += self.ser.read(n).decode("utf-8", errors="replace")
+                        while "\n" in rx_buf:
+                            line, rx_buf = rx_buf.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            data = parse_telemetry_line(line)
+                            if data:
+                                soil = data.get("soil", [])
+                                moist = [raw_to_moisture(v, i) for i, v in enumerate(soil)]
+                                self.telemetry = {**data, "moisture_pct": moist}
+                                if soil and len(soil) != len(self.water_vars):
+                                    self.after(0, lambda n=len(soil): self.rebuild_relays(n))
+                                self.after(0, lambda d=data, m=moist: self._update_telemetry_ui(d, m))
+                                if time.time() - last_log >= 10.0:
+                                    self._log_telemetry_csv(data, moist)
+                                    last_log = time.time()
                     else:
                         time.sleep(0.05)
                 except Exception:
@@ -675,7 +760,7 @@ class MainWindow(tk.Tk):
         self.stop_threads.set()
         try:
             self.send_bitmask("0" * max(1, len(self.water_vars)))
-            self.recenter_gimbal()
+            self.send_command("c")  # direct center (reader thread already stopped)
             time.sleep(0.3)
         except Exception as e:
             print(f"[Shutdown] Command error: {e}")
