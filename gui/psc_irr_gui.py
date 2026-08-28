@@ -31,7 +31,7 @@ from tkinter import filedialog
 
 import cv2
 import matplotlib
-matplotlib.use('TkAgg')
+matplotlib.use("TkAgg")
 import matplotlib.animation as animation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -40,7 +40,10 @@ from PIL import Image, ImageTk
 import serial
 import serial.tools.list_ports
 
-from modules.arducam import Camera
+try:
+    from gui.modules.arducam import Camera
+except (ImportError, ModuleNotFoundError):
+    from modules.arducam import Camera
 
 # Constants & Soil Calibration
 BAUDRATE = 9600
@@ -53,11 +56,11 @@ DATA_DIR.mkdir(exist_ok=True)
 PAN_MIN, PAN_MAX = 0, 130
 TILT_MIN, TILT_MAX = 0, 90
 PAN_CENTER, TILT_CENTER = 65, 60
-GIMBAL_STEP = 2  # degrees per nudge click
+GIMBAL_STEP = 5  # degrees per nudge click
 
 
 def _safe_float(val: str) -> float | None:
-    """Convert string to float, treating 'null', 'nan', or empty as None."""
+    """Convert string to float, treating 'null', 'none', 'nan', or empty as None."""
     s = val.strip().lower()
     if not s or s in ("null", "none", "nan"):
         return None
@@ -68,7 +71,7 @@ def _safe_float(val: str) -> float | None:
 
 
 def _safe_int(val: str) -> int | None:
-    """Convert string to int, treating 'null', 'nan', or empty as None."""
+    """Convert string to int, treating 'null', 'none', 'nan', or empty as None."""
     s = val.strip().lower()
     if not s or s in ("null", "none", "nan"):
         return None
@@ -79,11 +82,7 @@ def _safe_int(val: str) -> int | None:
 
 
 def parse_telemetry_line(raw_line: str) -> dict | None:
-    """Parse tagged CSV telemetry string into a dictionary.
-
-    Format:
-      soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,val,relays,mask,pan,val,tilt,val
-    """
+    """Parse tagged CSV telemetry string into a dictionary."""
     line = raw_line.strip()
     if not line or line.lower().startswith(("soil1,", "format:", "status:", "ack:", "err:")):
         return None
@@ -103,24 +102,18 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
         "tilt": TILT_CENTER,
     }
     try:
-        i = 0
-        n = len(tokens)
+        i, n = 0, len(tokens)
         while i < n:
             tag = tokens[i].lower()
             if tag == "soil":
-                soil_vals = []
-                j = i + 1
+                soil_vals, j = [], i + 1
                 while j < n and len(soil_vals) < 4:
-                    val_str = tokens[j]
-                    if val_str.lower() in ("soil_temp", "temp", "humi", "light", "relays", "pan", "tilt"):
+                    if tokens[j].lower() in ("soil_temp", "temp", "air_temp", "humi", "humidity", "light", "relays", "pan", "tilt"):
                         break
-                    soil_vals.append(_safe_int(val_str))
+                    soil_vals.append(_safe_int(tokens[j]))
                     j += 1
-                while len(soil_vals) < 4:
-                    soil_vals.append(None)
-                data["soil"] = soil_vals
+                data["soil"] = soil_vals + [None] * (4 - len(soil_vals))
                 i = j
-                continue
             elif tag == "soil_temp" and i + 1 < n:
                 data["soil_temp"] = _safe_float(tokens[i + 1])
                 i += 2
@@ -152,36 +145,24 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
 def format_telemetry_compact(data: dict) -> str:
     """Format parsed telemetry dictionary into a clean single-line summary."""
     now = datetime.now().strftime("%H:%M:%S")
-    soil_list = data.get("soil", [])
-    soil_strs = [f"{v:3d}" if v is not None else "---" for v in soil_list]
-    soil_repr = "[" + ", ".join(soil_strs) + "]"
-
-    st = data.get("soil_temp")
-    soil_temp_str = f"{st:.1f}°C" if st is not None else "N/A"
-
-    t = data.get("temp")
-    h = data.get("humidity")
-    air_temp_str = f"{t:.1f}°C" if t is not None else "N/A"
-    air_humi_str = f"{h:.1f}%" if h is not None else "N/A"
-
-    light_val = data.get("light")
-    light_str = str(light_val) if light_val is not None else "N/A"
-
-    relays_str = data.get("relays", "N/A")
-    pan_val = data.get("pan")
-    tilt_val = data.get("tilt")
-    pan_str = f"{pan_val}°" if pan_val is not None else "N/A"
-    tilt_str = f"{tilt_val}°" if tilt_val is not None else "N/A"
+    soil = [f"{v:3d}" if v is not None else "---" for v in data.get("soil", [])]
+    soil_repr = "[" + ", ".join(soil) + "]"
+    st = f"{data['soil_temp']:.1f}°C" if data.get("soil_temp") is not None else "N/A"
+    at = f"{data['temp']:.1f}°C" if data.get("temp") is not None else "N/A"
+    ah = f"{data['humidity']:.1f}%" if data.get("humidity") is not None else "N/A"
+    lt = str(data["light"]) if data.get("light") is not None else "N/A"
+    relays = data.get("relays", "N/A")
+    pan = f"{data['pan']}°" if data.get("pan") is not None else "N/A"
+    tilt = f"{data['tilt']}°" if data.get("tilt") is not None else "N/A"
 
     return (
-        f"[{now}] Soil: {soil_repr:<19} | SoilTemp: {soil_temp_str:<6} | "
-        f"Air: {air_temp_str:<6} {air_humi_str:<6} | Light: {light_str:<3} | "
-        f"Relays: {relays_str:<4} | Pan: {pan_str:<4} | Tilt: {tilt_str:<3}"
+        f"[{now}] Soil: {soil_repr:<19} | SoilTemp: {st:<6} | "
+        f"Air: {at:<6} {ah:<6} | Light: {lt:<3} | Relays: {relays:<4} | Pan: {pan:<4} | Tilt: {tilt:<3}"
     )
 
 
 def raw_to_moisture(raw: float | int | None, ch: int) -> float | None:
-    """Convert raw soil ADC to 0-100% moisture percentage. Returns None if sensor is disconnected."""
+    """Convert raw soil ADC to 0-100% moisture percentage."""
     if raw is None:
         return None
     base = AIR_BASELINES[ch] if ch < len(AIR_BASELINES) else (sum(AIR_BASELINES) / len(AIR_BASELINES))
@@ -192,7 +173,7 @@ def find_arduino_port() -> str | None:
     """Auto-detect connected Arduino or serial adapter port."""
     ports = list(serial.tools.list_ports.comports())
     for p in ports:
-        if p.vid in (0x2341, 0x3343, 0x1A86, 0x10C4):
+        if getattr(p, "vid", None) in (0x2341, 0x3343, 0x1A86, 0x10C4):
             return p.device
     for p in ports:
         dev = f"{p.description or ''} {p.device or ''}".lower()
@@ -214,7 +195,6 @@ class PlotWindow:
         self.xdata: list[float] = []
         self.ydata: list[list[float]] = [[] for _ in range(self.max_ch)]
 
-        # Setup figure
         self.fig = Figure(figsize=(7.5, 5.2), dpi=100)
         self.ax = self.fig.add_subplot(111)
         self.lines, self.labels = [], []
@@ -239,15 +219,12 @@ class PlotWindow:
         x, moistures = data
         if not self.xdata or x < self.xdata[-1] or x == 0:
             self.xdata = [x]
-            self.ydata = [
-                [moistures[i] if (i < len(moistures) and moistures[i] is not None) else np.nan]
-                for i in range(self.max_ch)
-            ]
+            self.ydata = [[m if m is not None else np.nan] for m in (moistures[:self.max_ch] + [None] * max(0, self.max_ch - len(moistures)))]
         else:
             self.xdata.append(x)
             for i in range(self.max_ch):
-                val = moistures[i] if (i < len(moistures) and moistures[i] is not None) else np.nan
-                self.ydata[i].append(val)
+                m = moistures[i] if i < len(moistures) else None
+                self.ydata[i].append(m if m is not None else np.nan)
 
         for i in range(self.max_ch):
             latest = self.ydata[i][-1] if self.ydata[i] else np.nan
@@ -258,11 +235,9 @@ class PlotWindow:
                 self.labels[i].set_text(f" S{i+1}: {latest:.1f}%")
                 self.labels[i].set_visible(True)
             else:
-                if all(np.isnan(v) for v in self.ydata[i]):
-                    self.lines[i].set_visible(False)
-                else:
+                self.lines[i].set_visible(not all(np.isnan(v) for v in self.ydata[i]))
+                if self.lines[i].get_visible():
                     self.lines[i].set_data(self.xdata, self.ydata[i])
-                    self.lines[i].set_visible(True)
                 self.labels[i].set_visible(False)
 
         return tuple(self.lines) + tuple(self.labels)
@@ -283,8 +258,7 @@ class PlotWindow:
                 self.window.title("Soil Moisture Telemetry (Last 60s)")
                 self.window.geometry("750x550")
                 self.window.protocol("WM_DELETE_WINDOW", lambda: (self.toggle(False), on_close and on_close()))
-                canvas = FigureCanvasTkAgg(self.fig, master=self.window)
-                canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                FigureCanvasTkAgg(self.fig, master=self.window).get_tk_widget().pack(fill=tk.BOTH, expand=True)
                 self.ani = animation.FuncAnimation(self.fig, self._update, self._gen, interval=500, cache_frame_data=False)
             else:
                 self.window.deiconify()
@@ -303,23 +277,23 @@ class MainWindow(tk.Tk):
         super().__init__()
         self.title("CEA Irrigation Controller GUI")
 
-        # Dimensions & Sizing
         self.scr_w = self.winfo_screenwidth()
         self.scr_h = self.winfo_screenheight() - 55
         self.geometry(f"{self.scr_w}x{self.scr_h}+0+0")
         margin_w, btn_h = int(self.scr_w / 5), int(self.scr_h / 7)
         gap_y = int(btn_h / 10)
+        y_pos = lambda slot: btn_h * slot + gap_y * (slot + 1)
 
         # Hardware & Telemetry State
         self.ser: serial.Serial | None = None
+        self.serial_lock = threading.Lock()  # guards self.ser against reader/writer races
         self.stop_threads = threading.Event()
         self.telemetry = {
             "soil": [], "moisture_pct": [], "soil_temp": None,
             "temp": None, "humidity": None, "light": None,
             "relays": "0000", "pan": PAN_CENTER, "tilt": TILT_CENTER
         }
-        self.current_pan = PAN_CENTER
-        self.current_tilt = TILT_CENTER
+        self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
         self._repeat_job: str | None = None
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.flag_capture = False
@@ -333,10 +307,9 @@ class MainWindow(tk.Tk):
         paned.add(left_frame, width=self.scr_w - margin_w, height=self.scr_h)
         paned.add(right_frame)
 
-        # Bottom Bar under Camera in left_frame
         self._build_bottom_bar(left_frame)
 
-        # Canvas for Camera / Images (packed above bottom bar)
+        # Canvas with Scrollbars
         self.y_scrl = tk.Scrollbar(left_frame, orient=tk.VERTICAL)
         self.y_scrl.pack(fill=tk.Y, side=tk.RIGHT)
         self.x_scrl = tk.Scrollbar(left_frame, orient=tk.HORIZONTAL)
@@ -348,93 +321,48 @@ class MainWindow(tk.Tk):
 
         # Sidebar Buttons (right_frame)
         self.auto_var = tk.IntVar(value=1)
-        self.ckb_auto = tk.Checkbutton(right_frame, text="AUTO", font=("arial", 32, "bold"), bg="white",
-                                       selectcolor="light green", bd=4, indicatoron=False, variable=self.auto_var,
-                                       command=self._on_auto_toggle)
-        self.ckb_auto.place(x=0, y=gap_y, width=margin_w, height=btn_h)
+        self.ckb_auto = tk.Checkbutton(
+            right_frame, text="AUTO", font=("arial", 32, "bold"), bg="white",
+            selectcolor="light green", bd=4, indicatoron=False, variable=self.auto_var,
+            command=self._on_auto_toggle
+        )
+        self.ckb_auto.place(x=0, y=y_pos(0), width=margin_w, height=btn_h)
 
         self.plot_var = tk.IntVar(value=0)
-        self.ckb_plot = tk.Checkbutton(right_frame, text="Plot", font=("arial", 32, "bold"), bg="white",
-                                       selectcolor="light grey", bd=4, indicatoron=False, variable=self.plot_var,
-                                       command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0)))
-        self.ckb_plot.place(x=0, y=btn_h + gap_y * 2, width=margin_w, height=btn_h)
+        self.ckb_plot = tk.Checkbutton(
+            right_frame, text="Plot", font=("arial", 32, "bold"), bg="white",
+            selectcolor="light grey", bd=4, indicatoron=False, variable=self.plot_var,
+            command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0))
+        )
+        self.ckb_plot.place(x=0, y=y_pos(1), width=margin_w, height=btn_h)
 
         self.water_frame = tk.Frame(right_frame, bg="light grey")
-        self.water_frame.place(x=0, y=btn_h * 2 + gap_y * 3, width=margin_w, height=btn_h)
+        self.water_frame.place(x=0, y=y_pos(2), width=margin_w, height=btn_h)
         self.water_vars: list[tk.IntVar] = []
         self.water_btns: list[tk.Checkbutton] = []
         self.rebuild_relays(4)
 
         self.live_var = tk.IntVar(value=1)
-        self.ckb_live = tk.Checkbutton(right_frame, text="Live", font=("arial", 32, "bold"), bg="white",
-                                       selectcolor="yellow", bd=4, indicatoron=False, variable=self.live_var,
-                                       command=self._on_live_toggle)
-        self.ckb_live.place(x=0, y=btn_h * 3 + gap_y * 4, width=margin_w, height=btn_h)
-
-        self.btn_capture = tk.Button(right_frame, text="Capture", font=("arial", 32, "bold"), bg="white", fg="black",
-                                     activebackground="purple", activeforeground="white", bd=4, command=self._on_capture)
-        self.btn_capture.place(x=0, y=btn_h * 4 + gap_y * 5, width=margin_w, height=btn_h)
-        self.btn_capture.bind("<ButtonPress-1>", lambda e: self.live_var.get() and self.btn_capture.config(bg="purple", fg="white"))
-        self.btn_capture.bind("<ButtonRelease-1>", lambda e: self.live_var.get() and self.btn_capture.config(bg="white", fg="black"))
-        self.btn_capture.bind("<Leave>", lambda e: self.live_var.get() and self.btn_capture.config(bg="white", fg="black"))
-
-        # Gimbal D-Pad Panel in right_frame (Slots 5 & 6)
-        gimbal_y = btn_h * 5 + gap_y * 6
-        gimbal_h = self.scr_h - gimbal_y - gap_y * 2
-        self.gimbal_frame = tk.LabelFrame(
-            right_frame, text=" GIMBAL ", font=("arial", 20, "bold"),
-            fg="#0d6efd", bg="#f8f9fa", bd=3, relief=tk.GROOVE
+        self.ckb_live = tk.Checkbutton(
+            right_frame, text="Live", font=("arial", 32, "bold"), bg="white",
+            selectcolor="yellow", bd=4, indicatoron=False, variable=self.live_var,
+            command=self._on_live_toggle
         )
-        self.gimbal_frame.place(x=0, y=gimbal_y, width=margin_w, height=gimbal_h)
+        self.ckb_live.place(x=0, y=y_pos(3), width=margin_w, height=btn_h)
 
-        for c in range(3):
-            self.gimbal_frame.grid_columnconfigure(c, weight=1, uniform="g_col")
-        for r in range(3):
-            self.gimbal_frame.grid_rowconfigure(r, weight=1, uniform="g_row")
-
-        gbtn_cfg = {
-            "font": ("arial", 28, "bold"), "bd": 4,
-            "bg": "#495057", "fg": "white",
-            "activebackground": "#6c757d", "activeforeground": "white"
-        }
-
-        self.btn_tilt_up = tk.Button(self.gimbal_frame, text="▲", **gbtn_cfg)
-        self.btn_tilt_up.grid(row=0, column=1, sticky="nsew", padx=4, pady=2)
-        self.btn_tilt_up.bind("<ButtonPress-1>", lambda e: self._start_repeat(lambda: self.nudge_tilt(-GIMBAL_STEP)))
-        self.btn_tilt_up.bind("<ButtonRelease-1>", self._stop_repeat)
-        self.btn_tilt_up.bind("<Leave>", self._stop_repeat)
-
-        self.btn_pan_left = tk.Button(self.gimbal_frame, text="◀", **gbtn_cfg)
-        self.btn_pan_left.grid(row=1, column=0, sticky="nsew", padx=4, pady=2)
-        self.btn_pan_left.bind("<ButtonPress-1>", lambda e: self._start_repeat(lambda: self.nudge_pan(GIMBAL_STEP)))
-        self.btn_pan_left.bind("<ButtonRelease-1>", self._stop_repeat)
-        self.btn_pan_left.bind("<Leave>", self._stop_repeat)
-
-        self.btn_center = tk.Button(
-            self.gimbal_frame, text="⌖ Center", font=("arial", 18, "bold"), bd=4,
-            bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white",
-            command=self.recenter_gimbal
+        self.btn_capture = tk.Button(
+            right_frame, text="Capture", font=("arial", 32, "bold"), bg="white", fg="black",
+            activebackground="purple", activeforeground="white", bd=4, command=self._on_capture
         )
-        self.btn_center.grid(row=1, column=1, sticky="nsew", padx=4, pady=2)
+        self.btn_capture.place(x=0, y=y_pos(4), width=margin_w, height=btn_h)
+        self._bind_capture_highlight()
 
-        self.btn_pan_right = tk.Button(self.gimbal_frame, text="▶", **gbtn_cfg)
-        self.btn_pan_right.grid(row=1, column=2, sticky="nsew", padx=4, pady=2)
-        self.btn_pan_right.bind("<ButtonPress-1>", lambda e: self._start_repeat(lambda: self.nudge_pan(-GIMBAL_STEP)))
-        self.btn_pan_right.bind("<ButtonRelease-1>", self._stop_repeat)
-        self.btn_pan_right.bind("<Leave>", self._stop_repeat)
+        self._build_gimbal_panel(right_frame, margin_w, y_pos(5), self.scr_h - y_pos(5) - gap_y)
 
-        self.btn_tilt_down = tk.Button(self.gimbal_frame, text="▼", **gbtn_cfg)
-        self.btn_tilt_down.grid(row=2, column=1, sticky="nsew", padx=4, pady=2)
-        self.btn_tilt_down.bind("<ButtonPress-1>", lambda e: self._start_repeat(lambda: self.nudge_tilt(GIMBAL_STEP)))
-        self.btn_tilt_down.bind("<ButtonRelease-1>", self._stop_repeat)
-        self.btn_tilt_down.bind("<Leave>", self._stop_repeat)
-
-        # Menu & Plotter
         self.plotter = PlotWindow(self, lambda: self.telemetry.get("moisture_pct", []))
         self._build_menu()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # Start Serial Thread & Loops
         self._init_serial()
         self._camera_loop()
         self._auto_loop()
@@ -444,36 +372,65 @@ class MainWindow(tk.Tk):
         bar.pack(side=tk.BOTTOM, fill=tk.X, padx=2, pady=2)
         bar.pack_propagate(False)
 
-        # Row 1: Environmental Telemetry
         row1 = tk.Frame(bar, bg="#1a1d20")
         row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(8, 0))
-
         tk.Label(row1, text="ENV:", font=("arial", 22, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 16))
-        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 22, "bold"), fg="#06d6a0", bg="#1a1d20")
-        self.lbl_soil_temp.pack(side=tk.LEFT, padx=14)
-        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 22, "bold"), fg="#ffd166", bg="#1a1d20")
-        self.lbl_air_temp.pack(side=tk.LEFT, padx=14)
-        self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 22, "bold"), fg="#4cc9f0", bg="#1a1d20")
-        self.lbl_air_humi.pack(side=tk.LEFT, padx=14)
-        self.lbl_light = tk.Label(row1, text="Light: --", font=("arial", 22, "bold"), fg="#f72585", bg="#1a1d20")
-        self.lbl_light.pack(side=tk.LEFT, padx=14)
 
-        # Row 2: Moisture Telemetry
+        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 22, "bold"), fg="#06d6a0", bg="#1a1d20")
+        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 22, "bold"), fg="#ffd166", bg="#1a1d20")
+        self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 22, "bold"), fg="#4cc9f0", bg="#1a1d20")
+        self.lbl_light = tk.Label(row1, text="Light: --", font=("arial", 22, "bold"), fg="#f72585", bg="#1a1d20")
+        for lbl in (self.lbl_soil_temp, self.lbl_air_temp, self.lbl_air_humi, self.lbl_light):
+            lbl.pack(side=tk.LEFT, padx=14)
+
         row2 = tk.Frame(bar, bg="#1a1d20")
         row2.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 8))
-
         tk.Label(row2, text="MOIST:", font=("arial", 22, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 16))
         self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=("arial", 22, "bold"), fg="#ffffff", bg="#1a1d20")
         self.lbl_soil_moist.pack(side=tk.LEFT, padx=14)
 
-    def _build_menu(self) -> None:
-        menubar = tk.Menu(self)
-        self.config(menu=menubar)
-        fmenu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=fmenu)
-        fmenu.add_command(label="Open Image", command=self._open_image)
-        fmenu.add_command(label="Exit", command=self.on_closing)
-        menubar.add_cascade(label="View", menu=tk.Menu(menubar, tearoff=0))
+    def _build_gimbal_panel(self, parent: tk.Frame, width: int, y: int, height: int) -> None:
+        self.gimbal_frame = tk.LabelFrame(
+            parent, text=" GIMBAL ", font=("arial", 20, "bold"),
+            fg="#0d6efd", bg="#f8f9fa", bd=3, relief=tk.GROOVE
+        )
+        self.gimbal_frame.place(x=0, y=y, width=width, height=height)
+        for i in range(3):
+            self.gimbal_frame.grid_columnconfigure(i, weight=1, uniform="g_col")
+            self.gimbal_frame.grid_rowconfigure(i, weight=1, uniform="g_row")
+
+        gcfg = {
+            "font": ("arial", 28, "bold"), "bd": 4, "bg": "#495057", "fg": "white",
+            "activebackground": "#6c757d", "activeforeground": "white"
+        }
+        dpad = [
+            ("btn_tilt_up", "▲", 0, 1, lambda: self.nudge_tilt(-GIMBAL_STEP)),
+            ("btn_pan_left", "◀", 1, 0, lambda: self.nudge_pan(GIMBAL_STEP)),
+            ("btn_pan_right", "▶", 1, 2, lambda: self.nudge_pan(-GIMBAL_STEP)),
+            ("btn_tilt_down", "▼", 2, 1, lambda: self.nudge_tilt(GIMBAL_STEP)),
+        ]
+        for attr, text, r, c, action in dpad:
+            btn = tk.Button(self.gimbal_frame, text=text, **gcfg)
+            btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=2)
+            btn.bind("<ButtonPress-1>", lambda e, a=action: self._start_repeat(a))
+            btn.bind("<ButtonRelease-1>", self._stop_repeat)
+            btn.bind("<Leave>", self._stop_repeat)
+            setattr(self, attr, btn)
+
+        self.btn_center = tk.Button(
+            self.gimbal_frame, text="⌖ Center", font=("arial", 18, "bold"), bd=4,
+            bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white",
+            command=self.recenter_gimbal
+        )
+        self.btn_center.grid(row=1, column=1, sticky="nsew", padx=4, pady=2)
+
+    def _bind_capture_highlight(self) -> None:
+        def set_btn(bg, fg):
+            if self.live_var.get():
+                self.btn_capture.config(bg=bg, fg=fg)
+        self.btn_capture.bind("<ButtonPress-1>", lambda e: set_btn("purple", "white"))
+        self.btn_capture.bind("<ButtonRelease-1>", lambda e: set_btn("white", "black"))
+        self.btn_capture.bind("<Leave>", lambda e: set_btn("white", "black"))
 
     def rebuild_relays(self, count: int) -> None:
         """Dynamically create W1..WN relay buttons in 1 row with solid black text."""
@@ -482,33 +439,36 @@ class MainWindow(tk.Tk):
         self.water_btns.clear()
         self.water_vars.clear()
         relays_str = self.telemetry.get("relays", "")
+        state = tk.DISABLED if self.auto_var.get() else tk.NORMAL
+
         for i in range(max(1, min(5, count))):
-            initial = 1 if (i < len(relays_str) and relays_str[i] == '1') else 0
-            var = tk.IntVar(value=initial)
+            var = tk.IntVar(value=1 if (i < len(relays_str) and relays_str[i] == '1') else 0)
             self.water_vars.append(var)
-            btn = tk.Checkbutton(self.water_frame, text=f"W{i+1}", font=("arial", 26, "bold"), bg="white",
-                                 fg="black", activeforeground="black", disabledforeground="black",
-                                 selectcolor="#1e88e5", indicatoron=False, variable=var, bd=3,
-                                 command=self._send_manual_relays)
+            btn = tk.Checkbutton(
+                self.water_frame, text=f"W{i+1}", font=("arial", 26, "bold"), bg="white",
+                fg="black", activeforeground="black", disabledforeground="black",
+                selectcolor="#1e88e5", indicatoron=False, variable=var, bd=3, state=state,
+                command=self._send_manual_relays
+            )
             btn.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
             self.water_btns.append(btn)
-        state = tk.DISABLED if self.auto_var.get() else tk.NORMAL
-        for b in self.water_btns:
-            b.config(state=state, disabledforeground="black")
 
     def _on_auto_toggle(self) -> None:
         is_auto = bool(self.auto_var.get())
         self.ckb_auto.config(text="AUTO" if is_auto else "MANUAL")
+        state = tk.DISABLED if is_auto else tk.NORMAL
         for b in self.water_btns:
-            b.config(state=tk.DISABLED if is_auto else tk.NORMAL, disabledforeground="black")
+            b.config(state=state, disabledforeground="black")
         if not is_auto:
             self._send_manual_relays()
 
     def _on_live_toggle(self) -> None:
         live = bool(self.live_var.get())
-        self.btn_capture.config(state=tk.NORMAL if live else tk.DISABLED,
-                                bg="white" if live else "light grey",
-                                fg="black" if live else "dark grey")
+        self.btn_capture.config(
+            state=tk.NORMAL if live else tk.DISABLED,
+            bg="white" if live else "light grey",
+            fg="black" if live else "dark grey"
+        )
 
     def _on_capture(self) -> None:
         if self.live_var.get() and self.camera.is_available:
@@ -521,18 +481,14 @@ class MainWindow(tk.Tk):
             self.send_bitmask("".join(str(v.get()) for v in self.water_vars))
 
     def send_bitmask(self, bitmask: str) -> None:
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.write((bitmask.strip() + "\n").encode("utf-8"))
-                self.ser.flush()
-            except Exception as e:
-                print(f"[Serial] Send error: {e}")
+        self.send_command(bitmask)
 
     def send_command(self, cmd: str) -> None:
         if self.ser and self.ser.is_open:
             try:
-                self.ser.write((cmd.strip() + "\n").encode("utf-8"))
-                self.ser.flush()
+                with self.serial_lock:
+                    self.ser.write((cmd.strip() + "\n").encode("utf-8"))
+                    self.ser.flush()
             except Exception as e:
                 print(f"[Serial] Command error: {e}")
 
@@ -558,20 +514,17 @@ class MainWindow(tk.Tk):
 
     def nudge_pan(self, delta: int) -> None:
         new_pan = max(PAN_MIN, min(PAN_MAX, self.current_pan + delta))
-        if new_pan != self.current_pan:
-            self.current_pan = new_pan
-            self.send_command(f"p {new_pan}")
+        self.current_pan = new_pan
+        self.send_command(f"p {new_pan}")
 
     def nudge_tilt(self, delta: int) -> None:
         new_tilt = max(TILT_MIN, min(TILT_MAX, self.current_tilt + delta))
-        if new_tilt != self.current_tilt:
-            self.current_tilt = new_tilt
-            self.send_command(f"t {new_tilt}")
+        self.current_tilt = new_tilt
+        self.send_command(f"t {new_tilt}")
 
     def recenter_gimbal(self) -> None:
         self._stop_repeat()
-        self.current_pan = PAN_CENTER
-        self.current_tilt = TILT_CENTER
+        self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
         self.send_command("c")
 
     def _init_serial(self) -> None:
@@ -589,24 +542,15 @@ class MainWindow(tk.Tk):
             print(f"[Serial] Error opening {port}: {e}")
 
     def _update_telemetry_ui(self, data: dict, moist: list[float | None]) -> None:
-        st = data.get("soil_temp")
+        st, at, ah, lv = data.get("soil_temp"), data.get("temp"), data.get("humidity"), data.get("light")
         self.lbl_soil_temp.config(text=f"Soil: {st:.1f}°C" if st is not None else "Soil: N/A")
-
-        at = data.get("temp")
         self.lbl_air_temp.config(text=f"Air: {at:.1f}°C" if at is not None else "Air: N/A")
-
-        ah = data.get("humidity")
         self.lbl_air_humi.config(text=f"RH: {ah:.1f}%" if ah is not None else "RH: N/A")
-
-        lv = data.get("light")
         self.lbl_light.config(text=f"Light: {lv}" if lv is not None else "Light: N/A")
 
-        moist_strs = []
-        for i, m in enumerate(moist):
-            moist_strs.append(f"S{i+1}: {m:.1f}%" if m is not None else f"S{i+1}: --")
+        moist_strs = [f"S{i+1}: {m:.1f}%" if m is not None else f"S{i+1}: --" for i, m in enumerate(moist)]
         self.lbl_soil_moist.config(text="  |  ".join(moist_strs) if moist_strs else "No sensors")
 
-        # Sync relay check buttons with confirmed Arduino relay bitmask
         relays_str = data.get("relays", "")
         for i in range(min(len(relays_str), len(self.water_vars))):
             expected = 1 if relays_str[i] == "1" else 0
@@ -616,37 +560,24 @@ class MainWindow(tk.Tk):
     def _log_telemetry_csv(self, data: dict, moist: list[float | None]) -> None:
         """Append a telemetry record to daily CSV file in DATA_DIR with a single header row."""
         try:
-            today_str = datetime.now().strftime("%Y%m%d")
-            csv_path = DATA_DIR / f"telemetry_{today_str}.csv"
+            csv_path = DATA_DIR / f"telemetry_{datetime.now().strftime('%Y%m%d')}.csv"
             write_header = not csv_path.exists() or csv_path.stat().st_size == 0
-
-            with open(csv_path, "a", encoding="utf-8") as f:
+            with csv_path.open("a", encoding="utf-8") as f:
                 if write_header:
                     f.write(
                         "timestamp,soil1_raw,soil2_raw,soil3_raw,soil4_raw,"
                         "soil1_pct,soil2_pct,soil3_pct,soil4_pct,"
                         "soil_temp_c,air_temp_c,humidity_pct,light,relays,pan_deg,tilt_deg\n"
                     )
-
-                now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                soil = data.get("soil", [])
-                s_raw = [str(v) if v is not None else "null" for v in soil]
-                while len(s_raw) < 4:
-                    s_raw.append("null")
-
-                s_pct = [f"{m:.1f}" if m is not None else "null" for m in moist]
-                while len(s_pct) < 4:
-                    s_pct.append("null")
-
+                s_raw = [(str(v) if v is not None else "null") for v in (data.get("soil", []) + [None] * 4)[:4]]
+                s_pct = [(f"{m:.1f}" if m is not None else "null") for m in (moist + [None] * 4)[:4]]
                 st = f"{data['soil_temp']:.1f}" if data.get("soil_temp") is not None else "null"
                 at = f"{data['temp']:.1f}" if data.get("temp") is not None else "null"
                 ah = f"{data['humidity']:.1f}" if data.get("humidity") is not None else "null"
                 lv = str(data["light"]) if data.get("light") is not None else "null"
-                relays = data.get("relays", "0000")
-                pan = str(data.get("pan", PAN_CENTER))
-                tilt = str(data.get("tilt", TILT_CENTER))
-
-                row = [now_ts] + s_raw[:4] + s_pct[:4] + [st, at, ah, lv, relays, pan, tilt]
+                row = [datetime.now().strftime("%Y-%m-%d %H:%M:%S")] + s_raw + s_pct + [
+                    st, at, ah, lv, data.get("relays", "0000"), str(data.get("pan", PAN_CENTER)), str(data.get("tilt", TILT_CENTER))
+                ]
                 f.write(",".join(row) + "\n")
         except Exception:
             pass
@@ -656,28 +587,19 @@ class MainWindow(tk.Tk):
         while not self.stop_threads.is_set():
             if self.ser and self.ser.is_open:
                 try:
-                    if self.ser.in_waiting:
-                        line = self.ser.readline().decode("utf-8", errors="replace").strip()
+                    with self.serial_lock:
+                        waiting = self.ser.in_waiting
+                    if waiting:
+                        with self.serial_lock:
+                            line = self.ser.readline().decode("utf-8", errors="replace").strip()
                         data = parse_telemetry_line(line)
                         if data:
                             soil = data.get("soil", [])
                             moist = [raw_to_moisture(v, i) for i, v in enumerate(soil)]
-                            self.telemetry = {
-                                "soil": soil,
-                                "moisture_pct": moist,
-                                "soil_temp": data.get("soil_temp"),
-                                "temp": data.get("temp"),
-                                "humidity": data.get("humidity"),
-                                "light": data.get("light"),
-                                "relays": data.get("relays", ""),
-                                "pan": data.get("pan", PAN_CENTER),
-                                "tilt": data.get("tilt", TILT_CENTER),
-                            }
+                            self.telemetry = {**data, "moisture_pct": moist}
                             if soil and len(soil) != len(self.water_vars):
                                 self.after(0, lambda n=len(soil): self.rebuild_relays(n))
-
                             self.after(0, lambda d=data, m=moist: self._update_telemetry_ui(d, m))
-
                             if time.time() - last_log >= 10.0:
                                 self._log_telemetry_csv(data, moist)
                                 last_log = time.time()
@@ -692,8 +614,7 @@ class MainWindow(tk.Tk):
             if frame is not None:
                 self.display_image(frame)
                 if self.flag_capture:
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
-                    out = DATA_DIR / f"{ts}.jpg"
+                    out = DATA_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:19]}.jpg"
                     cv2.imwrite(str(out), frame)
                     print(f"[Capture] Saved snapshot to {out}")
                     self.flag_capture = False
@@ -705,7 +626,6 @@ class MainWindow(tk.Tk):
             mask, changed = [], False
             for i in range(min(len(moistures), len(self.water_vars))):
                 m = moistures[i]
-                # Disconnected sensor (None) -> safe OFF
                 des = 1 if (m is not None and m < SOIL_WATER_SETPOINT) else 0
                 if self.water_vars[i].get() != des:
                     self.water_vars[i].set(des)
@@ -725,6 +645,15 @@ class MainWindow(tk.Tk):
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo_ref)
         self.canvas.config(scrollregion=(0, 0, pil_img.width, pil_img.height))
+
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+        fmenu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=fmenu)
+        fmenu.add_command(label="Open Image", command=self._open_image)
+        fmenu.add_command(label="Exit", command=self.on_closing)
+        menubar.add_cascade(label="View", menu=tk.Menu(menubar, tearoff=0))
 
     def _open_image(self) -> None:
         p = filedialog.askopenfilename(title="Open Image", filetypes=[("Images", "*.jpg *.png *.tif")])

@@ -23,7 +23,7 @@ const int SOIL_PINS[NUM_SOIL]    = {A0, A1, A2, A3};
 #define DS18S20_PIN 8
 
 // ── Servo Configuration ──────────────────────────────────────────────
-const unsigned long SERVO_DETACH_DELAY = 500; // ms before auto-detach (prevents interrupt jitter)
+const unsigned long SERVO_DETACH_DELAY = 1500; // ms before auto-detach (prevents interrupt jitter)
 
 struct ServoConfig {
   Servo         servo;
@@ -42,8 +42,15 @@ ServoConfig servos[] = {
 void moveServo(int idx, int angle) {
   ServoConfig& s = servos[idx];
   angle = constrain(angle, s.minAngle, s.maxAngle);
-  if (!s.servo.attached()) s.servo.attach(s.pin);
-  s.servo.write(angle);
+  // Write before attach: pre-loads the target pulse into the Servo library's
+  // internal state so the servo goes directly to 'angle' on re-attach instead
+  // of snapping to a default/stale position first (critical for gravity-loaded axes).
+  if (!s.servo.attached()) {
+    s.servo.write(angle);   // pre-load target
+    s.servo.attach(s.pin);  // enable PWM at that angle
+  } else {
+    s.servo.write(angle);
+  }
   s.current  = angle;
   s.active   = true;
   s.moveTime = millis();

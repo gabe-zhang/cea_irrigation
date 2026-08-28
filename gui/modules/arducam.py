@@ -15,7 +15,6 @@ class Camera:
     def __init__(self, width: int = 1536, height: int = 864) -> None:
         self.picam2: Picamera2 | None = None
         if Picamera2 is None:
-            print("[Camera] Picamera2 is not installed.")
             return
 
         try:
@@ -26,7 +25,7 @@ class Camera:
             self.picam2.configure("preview")
             self.picam2.start()
         except Exception as e:
-            print(f"[Camera] Camera not available: {e}")
+            print(f"[Camera] Camera initialization error: {e}")
             self.picam2 = None
 
     @property
