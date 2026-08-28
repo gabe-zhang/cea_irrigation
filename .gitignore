@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Runtime telemetry data & captured images
+Data/
+img_bbox.jpg
+img_mask.jpg
+
