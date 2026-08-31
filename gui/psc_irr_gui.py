@@ -48,7 +48,8 @@ except (ImportError, ModuleNotFoundError):
 # Constants & Soil Calibration
 BAUDRATE = 9600
 SOIL_WATER_SETPOINT = 40.0  # Trigger pump below this moisture % in AUTO mode
-AIR_BASELINES = [474.0, 454.0, 459.0, 460.0]
+DRY_BASELINES = [432.0, 408.0, 427.0, 424.0]
+WET_BASELINES = [136.0, 92.0, 159.0, 160.0]
 DATA_DIR = Path("Data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -146,11 +147,15 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
 
 
 def raw_to_moisture(raw: float | int | None, ch: int) -> float | None:
-    """Convert raw soil ADC to 0-100% moisture percentage."""
+    """Convert raw soil ADC to 0-100% moisture percentage using two-point dry/wet calibration."""
     if raw is None:
         return None
-    base = AIR_BASELINES[ch] if ch < len(AIR_BASELINES) else (sum(AIR_BASELINES) / len(AIR_BASELINES))
-    return max(0.0, min(100.0, ((base - float(raw)) / base) * 100.0))
+    dry = DRY_BASELINES[ch] if ch < len(DRY_BASELINES) else (sum(DRY_BASELINES) / len(DRY_BASELINES))
+    wet = WET_BASELINES[ch] if ch < len(WET_BASELINES) else (sum(WET_BASELINES) / len(WET_BASELINES))
+    if dry == wet:
+        return 0.0
+    pct = ((dry - float(raw)) / (dry - wet)) * 100.0
+    return max(0.0, min(100.0, pct))
 
 
 def find_arduino_port() -> str | None:

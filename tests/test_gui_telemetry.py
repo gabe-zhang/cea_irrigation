@@ -6,9 +6,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from gui.psc_irr_gui import (
-    AIR_BASELINES,
     BAUDRATE,
     DATA_DIR,
+    DRY_BASELINES,
     GIMBAL_STEP,
     PAN_CENTER,
     PAN_MAX,
@@ -17,6 +17,7 @@ from gui.psc_irr_gui import (
     TILT_CENTER,
     TILT_MAX,
     TILT_MIN,
+    WET_BASELINES,
     _safe_float,
     _safe_int,
     find_arduino_port,
@@ -113,25 +114,33 @@ def test_parse_ignore_system_and_invalid():
 # --- Soil Moisture Calibration Tests ---
 
 def test_raw_to_moisture_channels():
-    # Dry air reading should be ~0.0%
-    for ch, base in enumerate(AIR_BASELINES):
+    # Dry baseline reading should be ~0.0%
+    for ch, base in enumerate(DRY_BASELINES):
         val = raw_to_moisture(base, ch)
         assert pytest.approx(val, 0.1) == 0.0
 
-    # Halfway wet
-    assert pytest.approx(raw_to_moisture(237.0, 0), 0.1) == 50.0
+    # Wet baseline reading should be ~100.0%
+    for ch, base in enumerate(WET_BASELINES):
+        val = raw_to_moisture(base, ch)
+        assert pytest.approx(val, 0.1) == 100.0
 
-    # Totally submerged or higher than baseline clamped to bounds
-    assert raw_to_moisture(0.0, 0) == 100.0
-    assert raw_to_moisture(550.0, 0) == 0.0  # drier than air baseline clamped to 0
+    # Halfway (midpoint between dry and wet) should be ~50.0%
+    mid_ch0 = (DRY_BASELINES[0] + WET_BASELINES[0]) / 2.0
+    assert pytest.approx(raw_to_moisture(mid_ch0, 0), 0.1) == 50.0
+
+    # Out of bounds clamping
+    assert raw_to_moisture(0.0, 0) == 100.0  # wetter than wet baseline clamped to 100%
+    assert raw_to_moisture(550.0, 0) == 0.0  # drier than dry baseline clamped to 0%
 
     # Disconnected sensor (None) returns None
     assert raw_to_moisture(None, 0) is None
     assert raw_to_moisture(None, 3) is None
 
-    # Channel beyond AIR_BASELINES uses average baseline
-    avg_base = sum(AIR_BASELINES) / len(AIR_BASELINES)
-    assert pytest.approx(raw_to_moisture(avg_base, 5), 0.1) == 0.0
+    # Channel beyond baseline lists uses average baselines
+    avg_dry = sum(DRY_BASELINES) / len(DRY_BASELINES)
+    avg_wet = sum(WET_BASELINES) / len(WET_BASELINES)
+    assert pytest.approx(raw_to_moisture(avg_dry, 5), 0.1) == 0.0
+    assert pytest.approx(raw_to_moisture(avg_wet, 5), 0.1) == 100.0
 
 
 # --- Telemetry Format Tests ---
