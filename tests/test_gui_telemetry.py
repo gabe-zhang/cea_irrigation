@@ -20,10 +20,11 @@ from gui.psc_irr_gui import (
     _safe_float,
     _safe_int,
     find_arduino_port,
-    format_telemetry_compact,
     parse_telemetry_line,
     raw_to_moisture,
 )
+from scripts.controller import format_telemetry_compact
+
 
 
 # --- Helper Conversion Tests ---

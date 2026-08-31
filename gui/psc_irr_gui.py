@@ -142,23 +142,7 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
         return None
 
 
-def format_telemetry_compact(data: dict) -> str:
-    """Format parsed telemetry dictionary into a clean single-line summary."""
-    now = datetime.now().strftime("%H:%M:%S")
-    soil = [f"{v:3d}" if v is not None else "---" for v in data.get("soil", [])]
-    soil_repr = "[" + ", ".join(soil) + "]"
-    st = f"{data['soil_temp']:.1f}°C" if data.get("soil_temp") is not None else "N/A"
-    at = f"{data['temp']:.1f}°C" if data.get("temp") is not None else "N/A"
-    ah = f"{data['humidity']:.1f}%" if data.get("humidity") is not None else "N/A"
-    lt = str(data["light"]) if data.get("light") is not None else "N/A"
-    relays = data.get("relays", "N/A")
-    pan = f"{data['pan']}°" if data.get("pan") is not None else "N/A"
-    tilt = f"{data['tilt']}°" if data.get("tilt") is not None else "N/A"
 
-    return (
-        f"[{now}] Soil: {soil_repr:<19} | SoilTemp: {st:<6} | "
-        f"Air: {at:<6} {ah:<6} | Light: {lt:<3} | Relays: {relays:<4} | Pan: {pan:<4} | Tilt: {tilt:<3}"
-    )
 
 
 def raw_to_moisture(raw: float | int | None, ch: int) -> float | None:
@@ -361,9 +345,7 @@ class MainWindow(tk.Tk):
             "relays": "0000", "pan": PAN_CENTER, "tilt": TILT_CENTER
         }
         self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
-        self._last_servo_cmd = 0.0  # monotonic timestamp for servo command throttling
         self._repeat_job: str | None = None
-        self._recenter_job: str | None = None
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.flag_capture = False
         self.photo_ref: ImageTk.PhotoImage | None = None
@@ -573,7 +555,6 @@ class MainWindow(tk.Tk):
     def _start_repeat(self, action_fn) -> None:
         """Execute action immediately, then schedule repeated execution while held."""
         self._stop_repeat()
-        self._cancel_recenter()
         action_fn()
 
         def _repeat_step():
@@ -591,26 +572,9 @@ class MainWindow(tk.Tk):
                 pass
             self._repeat_job = None
 
-    def _cancel_recenter(self) -> None:
-        if self._recenter_job is not None:
-            try:
-                self.after_cancel(self._recenter_job)
-            except Exception:
-                pass
-            self._recenter_job = None
 
-    def _servo_throttled(self) -> bool:
-        """Return True (and skip) if a servo command was sent too recently."""
-        now = time.monotonic()
-        if now - self._last_servo_cmd < 0.05:
-            return True
-        self._last_servo_cmd = now
-        return False
 
     def nudge_pan(self, delta: int) -> None:
-        self._cancel_recenter()
-        if self._servo_throttled():
-            return
         new_pan = max(PAN_MIN, min(PAN_MAX, self.current_pan + delta))
         if new_pan == self.current_pan:
             return
@@ -618,9 +582,6 @@ class MainWindow(tk.Tk):
         self.send_command(f"p {new_pan}")
 
     def nudge_tilt(self, delta: int) -> None:
-        self._cancel_recenter()
-        if self._servo_throttled():
-            return
         new_tilt = max(TILT_MIN, min(TILT_MAX, self.current_tilt + delta))
         if new_tilt == self.current_tilt:
             return
@@ -629,7 +590,6 @@ class MainWindow(tk.Tk):
 
     def recenter_gimbal(self) -> None:
         self._stop_repeat()
-        self._cancel_recenter()
         self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
         self.send_command("c")
 
