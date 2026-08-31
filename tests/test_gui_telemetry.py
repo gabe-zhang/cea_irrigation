@@ -252,7 +252,7 @@ def test_constants_and_bounds():
     assert PAN_MIN == 0 and PAN_MAX == 130
     assert TILT_MIN == 0 and TILT_MAX == 90
     assert PAN_CENTER == 65 and TILT_CENTER == 60
-    assert GIMBAL_STEP == 2
+    assert GIMBAL_STEP == 5
     assert BAUDRATE == 9600
     assert SOIL_WATER_SETPOINT == 40.0
 
@@ -269,23 +269,27 @@ def test_gimbal_nudging():
                     app.ser.is_open = True
 
                     # Pan limits
+                    app._last_servo_cmd = 0.0
                     app.current_pan = 129
                     app.nudge_pan(5)  # should cap at PAN_MAX (130)
                     assert app.current_pan == 130
                     app.ser.write.assert_called_with(b"p 130\n")
 
+                    app._last_servo_cmd = 0.0
                     app.current_pan = 1
                     app.nudge_pan(-5)  # should cap at PAN_MIN (0)
                     assert app.current_pan == 0
                     app.ser.write.assert_called_with(b"p 0\n")
 
                     # Tilt limits
+                    app._last_servo_cmd = 0.0
                     app.current_tilt = 88
                     app.nudge_tilt(10)  # should cap at TILT_MAX (90)
                     assert app.current_tilt == 90
                     app.ser.write.assert_called_with(b"t 90\n")
 
                     # Recenter
+                    app._last_servo_cmd = 0.0
                     app.recenter_gimbal()
                     assert app.current_pan == PAN_CENTER
                     assert app.current_tilt == TILT_CENTER

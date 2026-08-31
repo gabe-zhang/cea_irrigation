@@ -252,8 +252,15 @@ class PlotWindow:
         self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
         self.fig.subplots_adjust(hspace=0.35)
 
-    def _update(self, data: tuple[float, list[float | None], float | None, float | None, float | None]):
-        x, moistures, soil_temp, temp, rh = data
+    def _update(self, data: tuple):
+        if len(data) >= 5:
+            x, moistures, soil_temp, temp, rh = data[:5]
+        elif len(data) == 4:
+            x, moistures, temp, rh = data
+            soil_temp = None
+        else:
+            x, moistures = data[0], data[1]
+            soil_temp, temp, rh = None, None, None
         if not self.xdata or x < self.xdata[-1] or x == 0:
             self.xdata = [x]
             self.ydata_moist = [
@@ -356,6 +363,7 @@ class MainWindow(tk.Tk):
         self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
         self._last_servo_cmd = 0.0  # monotonic timestamp for servo command throttling
         self._repeat_job: str | None = None
+        self._recenter_job: str | None = None
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.flag_capture = False
         self.photo_ref: ImageTk.PhotoImage | None = None
@@ -413,10 +421,10 @@ class MainWindow(tk.Tk):
 
         self.btn_capture = tk.Button(
             right_frame, text="Capture", font=("arial", 32, "bold"), bg="white", fg="black",
-            activebackground="purple", activeforeground="white", bd=4, command=self._on_capture
+            activebackground="white", activeforeground="black", bd=4, command=self._on_capture
         )
         self.btn_capture.place(x=0, y=y_pos(4), width=margin_w, height=btn_h)
-        self._bind_capture_highlight()
+        self._bind_capture_click_hold()
 
         self._build_gimbal_panel(right_frame, margin_w, y_pos(5), self.scr_h - y_pos(5) - gap_y)
 
@@ -471,8 +479,11 @@ class MainWindow(tk.Tk):
             ("btn_tilt_down", "▼", 2, 1, lambda: self.nudge_tilt(GIMBAL_STEP)),
         ]
         for attr, text, r, c, action in dpad:
-            btn = tk.Button(self.gimbal_frame, text=text, command=action, **gcfg)
+            btn = tk.Button(self.gimbal_frame, text=text, **gcfg)
             btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=2)
+            btn.bind("<ButtonPress-1>", lambda e, a=action: self._start_repeat(a))
+            btn.bind("<ButtonRelease-1>", self._stop_repeat)
+            btn.bind("<Leave>", self._stop_repeat)
             setattr(self, attr, btn)
 
         self.btn_center = tk.Button(
@@ -482,13 +493,18 @@ class MainWindow(tk.Tk):
         )
         self.btn_center.grid(row=1, column=1, sticky="nsew", padx=4, pady=2)
 
-    def _bind_capture_highlight(self) -> None:
-        def set_btn(bg, fg):
+    def _bind_capture_click_hold(self) -> None:
+        def on_press(event=None):
             if self.live_var.get():
-                self.btn_capture.config(bg=bg, fg=fg)
-        self.btn_capture.bind("<ButtonPress-1>", lambda e: set_btn("purple", "white"))
-        self.btn_capture.bind("<ButtonRelease-1>", lambda e: set_btn("white", "black"))
-        self.btn_capture.bind("<Leave>", lambda e: set_btn("white", "black"))
+                self.btn_capture.config(bg="purple", fg="white", activebackground="purple", activeforeground="white")
+
+        def on_release(event=None):
+            if self.live_var.get():
+                self.btn_capture.config(bg="white", fg="black", activebackground="white", activeforeground="black")
+
+        self.btn_capture.bind("<ButtonPress-1>", on_press)
+        self.btn_capture.bind("<ButtonRelease-1>", on_release)
+        self.btn_capture.bind("<Leave>", on_release)
 
     def rebuild_relays(self, count: int) -> None:
         """Dynamically create W1..WN relay buttons in 1 row with solid black text."""
@@ -525,14 +541,18 @@ class MainWindow(tk.Tk):
         self.btn_capture.config(
             state=tk.NORMAL if live else tk.DISABLED,
             bg="white" if live else "light grey",
-            fg="black" if live else "dark grey"
+            fg="black" if live else "dark grey",
+            activebackground="white" if live else "light grey",
+            activeforeground="black" if live else "dark grey"
         )
 
     def _on_capture(self) -> None:
         if self.live_var.get() and self.camera.is_available:
             self.flag_capture = True
-            self.btn_capture.config(bg="purple", fg="white")
-            self.after(200, lambda: self.live_var.get() and self.btn_capture.config(bg="white", fg="black"))
+            self.btn_capture.config(bg="purple", fg="white", activebackground="purple", activeforeground="white")
+            self.after(200, lambda: self.live_var.get() and self.btn_capture.config(
+                bg="white", fg="black", activebackground="white", activeforeground="black"
+            ))
 
     def _send_manual_relays(self) -> None:
         if not self.auto_var.get():
@@ -544,26 +564,23 @@ class MainWindow(tk.Tk):
     def send_command(self, cmd: str) -> None:
         if self.ser and self.ser.is_open:
             try:
-                t0 = time.monotonic()
                 with self.serial_lock:
-                    t1 = time.monotonic()
                     self.ser.write((cmd.strip() + "\n").encode("utf-8"))
                     self.ser.flush()
-                    t2 = time.monotonic()
-                print(f"[CMD] '{cmd.strip()}' lock={1000*(t1-t0):.0f}ms write={1000*(t2-t1):.0f}ms")
             except Exception as e:
                 print(f"[Serial] Command error: {e}")
 
     def _start_repeat(self, action_fn) -> None:
         """Execute action immediately, then schedule repeated execution while held."""
         self._stop_repeat()
+        self._cancel_recenter()
         action_fn()
 
         def _repeat_step():
             action_fn()
-            self._repeat_job = self.after(350, _repeat_step)
+            self._repeat_job = self.after(100, _repeat_step)
 
-        self._repeat_job = self.after(400, _repeat_step)
+        self._repeat_job = self.after(200, _repeat_step)
 
     def _stop_repeat(self, event=None) -> None:
         """Cancel active press-and-hold repeat timer."""
@@ -574,39 +591,47 @@ class MainWindow(tk.Tk):
                 pass
             self._repeat_job = None
 
+    def _cancel_recenter(self) -> None:
+        if self._recenter_job is not None:
+            try:
+                self.after_cancel(self._recenter_job)
+            except Exception:
+                pass
+            self._recenter_job = None
+
     def _servo_throttled(self) -> bool:
         """Return True (and skip) if a servo command was sent too recently."""
         now = time.monotonic()
-        if now - self._last_servo_cmd < 0.50:
+        if now - self._last_servo_cmd < 0.05:
             return True
         self._last_servo_cmd = now
         return False
 
     def nudge_pan(self, delta: int) -> None:
+        self._cancel_recenter()
         if self._servo_throttled():
-            print(f"[THROTTLE] pan dropped")
             return
         new_pan = max(PAN_MIN, min(PAN_MAX, self.current_pan + delta))
+        if new_pan == self.current_pan:
+            return
         self.current_pan = new_pan
         self.send_command(f"p {new_pan}")
 
     def nudge_tilt(self, delta: int) -> None:
+        self._cancel_recenter()
         if self._servo_throttled():
-            print(f"[THROTTLE] tilt dropped")
             return
         new_tilt = max(TILT_MIN, min(TILT_MAX, self.current_tilt + delta))
+        if new_tilt == self.current_tilt:
+            return
         self.current_tilt = new_tilt
         self.send_command(f"t {new_tilt}")
 
     def recenter_gimbal(self) -> None:
-        if self._servo_throttled():
-            print(f"[THROTTLE] center dropped")
-            return
         self._stop_repeat()
-        self.current_pan = PAN_CENTER
-        self.send_command(f"p {PAN_CENTER}")
-        self.current_tilt = TILT_CENTER
-        self.after(150, lambda: self.send_command(f"t {TILT_CENTER}"))
+        self._cancel_recenter()
+        self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
+        self.send_command("c")
 
     def _init_serial(self) -> None:
         port = find_arduino_port()

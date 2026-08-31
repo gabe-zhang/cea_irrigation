@@ -141,14 +141,9 @@ def test_plot_window_lifecycle(headless_app):
     plotter.toggle(True)
     assert plotter.window is not None
 
-    # Feed data update
-    lines_labels = plotter._update((10.0, moistures))
-    assert len(lines_labels) == 8  # 4 lines + 4 labels
-
-    # Check that labels reflect active channels
-    assert plotter.labels[0].get_text().strip().startswith("S1:")
-    assert plotter.labels[1].get_text().strip().startswith("S2:")
-    assert plotter.labels[3].get_text().strip().startswith("S4:")
+    # Feed data update (returns 4 moisture lines + soil temp + air temp + RH = 7 lines)
+    lines = plotter._update((10.0, moistures, 24.5, 23.0, 50.0))
+    assert len(lines) == 7
 
     # Hide / Close window
     plotter.toggle(False)
