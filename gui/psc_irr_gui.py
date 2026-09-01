@@ -42,8 +42,10 @@ import serial.tools.list_ports
 
 try:
     from gui.modules.arducam import Camera
+    from gui.modules.plant_ai import PlantAIDetector
 except (ImportError, ModuleNotFoundError):
     from modules.arducam import Camera
+    from modules.plant_ai import PlantAIDetector
 
 # Constants & Soil Calibration
 BAUDRATE = 9600
@@ -336,7 +338,7 @@ class MainWindow(tk.Tk):
         self.scr_w = self.winfo_screenwidth()
         self.scr_h = self.winfo_screenheight() - 75
         self.geometry(f"{self.scr_w}x{self.scr_h}+0+0")
-        margin_w, btn_h = int(self.scr_w / 5), int(self.scr_h / 8.5)
+        margin_w, btn_h = int(self.scr_w / 5), int(self.scr_h / 9.5)
         gap_y = int(btn_h / 10)
         y_pos = lambda slot: btn_h * slot + gap_y * (slot + 1)
 
@@ -352,6 +354,7 @@ class MainWindow(tk.Tk):
         self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
         self._repeat_job: str | None = None
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
+        self.plant_ai = PlantAIDetector()
         self.flag_capture = False
         self.photo_ref: ImageTk.PhotoImage | None = None
 
@@ -413,7 +416,15 @@ class MainWindow(tk.Tk):
         self.btn_capture.place(x=0, y=y_pos(4), width=margin_w, height=btn_h)
         self._bind_capture_click_hold()
 
-        self._build_gimbal_panel(right_frame, margin_w, y_pos(5), self.scr_h - y_pos(5) - gap_y)
+        self.plant_ai_var = tk.IntVar(value=0)
+        self.ckb_plant_ai = tk.Checkbutton(
+            right_frame, text="Plant AI", font=("arial", 30, "bold"), bg="white",
+            selectcolor="#ffb703", bd=4, indicatoron=False, variable=self.plant_ai_var,
+            command=self._on_plant_ai_toggle
+        )
+        self.ckb_plant_ai.place(x=0, y=y_pos(5), width=margin_w, height=btn_h)
+
+        self._build_gimbal_panel(right_frame, margin_w, y_pos(6), self.scr_h - y_pos(6) - gap_y)
 
         self.plotter = PlotWindow(self, lambda: self.telemetry)
         self._build_menu()
@@ -436,7 +447,12 @@ class MainWindow(tk.Tk):
         self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 22, "bold"), fg="#ffd166", bg="#1a1d20")
         self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 22, "bold"), fg="#4cc9f0", bg="#1a1d20")
         self.lbl_light = tk.Label(row1, text="Light: --", font=("arial", 22, "bold"), fg="#f72585", bg="#1a1d20")
-        for lbl in (self.lbl_soil_temp, self.lbl_air_temp, self.lbl_air_humi, self.lbl_light):
+        
+        tpu_init_text = "TPU: Ready" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "TPU: Disconnected"
+        tpu_init_color = "#06d6a0" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "#e63946"
+        self.lbl_tpu_status = tk.Label(row1, text=tpu_init_text, font=("arial", 22, "bold"), fg=tpu_init_color, bg="#1a1d20")
+
+        for lbl in (self.lbl_soil_temp, self.lbl_air_temp, self.lbl_air_humi, self.lbl_light, self.lbl_tpu_status):
             lbl.pack(side=tk.LEFT, padx=14)
 
         row2 = tk.Frame(bar, bg="#1a1d20")
@@ -532,6 +548,18 @@ class MainWindow(tk.Tk):
             activebackground="white" if live else "light grey",
             activeforeground="black" if live else "dark grey"
         )
+
+    def _on_plant_ai_toggle(self) -> None:
+        if self.plant_ai_var.get():
+            if self.plant_ai.is_available:
+                self.lbl_tpu_status.config(text=f"TPU: Active ({self.plant_ai.last_latency_ms:.1f} ms)", fg="#06d6a0")
+            else:
+                self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
+        else:
+            if self.plant_ai.is_available:
+                self.lbl_tpu_status.config(text="TPU: Ready", fg="#06d6a0")
+            else:
+                self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
 
     def _on_capture(self) -> None:
         if self.live_var.get() and self.camera.is_available:
@@ -687,7 +715,16 @@ class MainWindow(tk.Tk):
         if self.live_var.get() and self.camera.is_available:
             frame = self.camera.capture_array()
             if frame is not None:
-                self.display_image(frame)
+                if self.plant_ai_var.get() == 1:
+                    results, latency = self.plant_ai.detect_and_analyze(frame)
+                    display_frame = self.plant_ai.draw_overlay(frame, results, latency)
+                    if self.plant_ai.is_available:
+                        self.lbl_tpu_status.config(text=f"TPU: Active ({latency:.1f} ms)", fg="#06d6a0")
+                    else:
+                        self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
+                else:
+                    display_frame = frame
+                self.display_image(display_frame)
                 if self.flag_capture:
                     out = DATA_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:19]}.jpg"
                     cv2.imwrite(str(out), frame)
@@ -733,7 +770,14 @@ class MainWindow(tk.Tk):
     def _open_image(self) -> None:
         p = filedialog.askopenfilename(title="Open Image", filetypes=[("Images", "*.jpg *.png *.tif")])
         if p:
-            self.display_image(Image.open(p))
+            img = cv2.imread(p)
+            if img is not None:
+                if self.plant_ai_var.get() == 1:
+                    results, latency = self.plant_ai.detect_and_analyze(img)
+                    img = self.plant_ai.draw_overlay(img, results, latency)
+                self.display_image(img)
+            else:
+                self.display_image(Image.open(p))
 
     def report_callback_exception(self, exc, val, tb) -> None:
         if issubclass(exc, KeyboardInterrupt):

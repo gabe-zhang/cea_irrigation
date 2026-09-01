@@ -29,6 +29,9 @@ def test_mainwindow_initial_state(headless_app):
     assert app.auto_var.get() == 1
     assert app.live_var.get() == 1
     assert app.plot_var.get() == 0
+    assert app.plant_ai_var.get() == 0
+    assert hasattr(app, "plant_ai")
+    assert hasattr(app, "lbl_tpu_status")
     assert len(app.water_vars) == 4
     assert len(app.water_btns) == 4
 
@@ -168,3 +171,34 @@ def test_mainwindow_on_closing(headless_app):
         app.camera.stop.assert_called_once()
         # Should exit
         mock_exit.assert_called_with(0)
+
+
+def test_mainwindow_plant_ai_toggle(headless_app):
+    app = headless_app
+
+    # Plant AI OFF -> Status is Ready or Disconnected
+    app.plant_ai_var.set(0)
+    app._on_plant_ai_toggle()
+    assert "Ready" in app.lbl_tpu_status["text"] or "Disconnected" in app.lbl_tpu_status["text"]
+
+    # Plant AI ON -> Status becomes Active or Disconnected
+    app.plant_ai_var.set(1)
+    app._on_plant_ai_toggle()
+    assert "Active" in app.lbl_tpu_status["text"] or "Disconnected" in app.lbl_tpu_status["text"]
+
+
+def test_mainwindow_camera_loop_with_plant_ai(headless_app):
+    import numpy as np
+
+    app = headless_app
+    app.live_var.set(1)
+    app.plant_ai_var.set(1)
+    app.camera.is_available = True
+    dummy_frame = np.full((100, 100, 3), (30, 200, 40), dtype=np.uint8)
+    app.camera.capture_array.return_value = dummy_frame
+
+    with patch.object(app, "display_image") as mock_display:
+        with patch.object(app, "after") as mock_after:
+            app._camera_loop()
+            mock_display.assert_called_once()
+            mock_after.assert_called_with(30, app._camera_loop)
