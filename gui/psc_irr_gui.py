@@ -334,9 +334,9 @@ class MainWindow(tk.Tk):
         self.title("CEA Irrigation Controller GUI")
 
         self.scr_w = self.winfo_screenwidth()
-        self.scr_h = self.winfo_screenheight() - 55
+        self.scr_h = self.winfo_screenheight() - 75
         self.geometry(f"{self.scr_w}x{self.scr_h}+0+0")
-        margin_w, btn_h = int(self.scr_w / 5), int(self.scr_h / 7)
+        margin_w, btn_h = int(self.scr_w / 5), int(self.scr_h / 8.5)
         gap_y = int(btn_h / 10)
         y_pos = lambda slot: btn_h * slot + gap_y * (slot + 1)
 
