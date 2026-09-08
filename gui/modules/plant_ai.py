@@ -25,16 +25,46 @@ class PlantHealthResult:
     necrosis_pct: float              # Percentage of browning foliage
     mean_hue: float                  # Mean Hue value (0-180 in OpenCV)
     color_bgr: tuple[int, int, int]  # Visual status color (BGR)
+    canopy_coverage: float           # Percentage of bbox area that is plant foliage
+    uniformity_score: float          # 0-100% score derived from hue variance (low variance -> high uniformity)
 
 
-def analyze_crop_health(crop: np.ndarray) -> tuple[str, float, float, float, float, tuple[int, int, int]]:
+def _create_rdylgn_lut() -> np.ndarray:
+    """Create 256-entry BGR lookup table for RdYlGn (Red-Yellow-Green) colormap."""
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    control_points = [
+        (0, (0, 0, 200)),      # Red
+        (64, (0, 128, 255)),   # Orange
+        (128, (0, 230, 230)),  # Yellow
+        (192, (0, 200, 100)),  # Yellow-Green
+        (255, (0, 180, 0)),    # Green
+    ]
+    for i in range(len(control_points) - 1):
+        idx0, c0 = control_points[i]
+        idx1, c1 = control_points[i + 1]
+        steps = idx1 - idx0
+        for step in range(steps):
+            t = step / steps
+            lut[idx0 + step] = [
+                int(c0[c] * (1.0 - t) + c1[c] * t) for c in range(3)
+            ]
+    lut[255] = control_points[-1][1]
+    return lut
+
+
+RDYLGN_LUT = _create_rdylgn_lut()
+
+
+def analyze_crop_health(crop: np.ndarray) -> tuple[str, float, float, float, float, tuple[int, int, int], float, float]:
     """Analyze plant canopy health using pure Hue (HSV) color space for green, yellowing, and browning.
     
     Returns:
-        tuple of (status_text, healthy_pct, yellowing_pct, browning_pct, mean_hue, color_bgr)
+        tuple of (status_text, healthy_pct, yellowing_pct, browning_pct, mean_hue, color_bgr, canopy_coverage, uniformity_score)
     """
     if crop is None or crop.size == 0 or crop.shape[0] < 5 or crop.shape[1] < 5:
-        return "NO VEGETATION", 0.0, 0.0, 0.0, 0.0, (128, 128, 128)
+        return "NO VEGETATION", 0.0, 0.0, 0.0, 0.0, (128, 128, 128), 0.0, 0.0
+
+    total_bbox_pixels = crop.shape[0] * crop.shape[1]
 
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     h = hsv[..., 0]  # OpenCV Hue: 0 - 180 (corresponds to 0° - 360°)
@@ -57,10 +87,15 @@ def analyze_crop_health(crop: np.ndarray) -> tuple[str, float, float, float, flo
     n_total = n_healthy + n_yellow + n_brown
 
     mean_hue = float(np.mean(h[foliage_mask])) if np.any(foliage_mask) else 0.0
+    canopy_coverage = (n_total / total_bbox_pixels) * 100.0 if total_bbox_pixels > 0 else 0.0
 
     # If no significant foliage pixels are found, reject as non-plant
     if n_total < 30:
-        return "NO VEGETATION", 0.0, 0.0, 0.0, mean_hue, (128, 128, 128)
+        return "NO VEGETATION", 0.0, 0.0, 0.0, mean_hue, (128, 128, 128), canopy_coverage, 0.0
+
+    # Hue standard deviation across foliage pixels
+    hue_std = float(np.std(h[foliage_mask]))
+    uniformity_score = float(max(0.0, 100.0 - (hue_std / 90.0) * 100.0))
 
     healthy_pct = (n_healthy / n_total) * 100.0
     yellowing_pct = (n_yellow / n_total) * 100.0
@@ -77,7 +112,7 @@ def analyze_crop_health(crop: np.ndarray) -> tuple[str, float, float, float, flo
         status = "HEALTHY"
         color = (30, 210, 30)  # Green
 
-    return status, healthy_pct, yellowing_pct, browning_pct, mean_hue, color
+    return status, healthy_pct, yellowing_pct, browning_pct, mean_hue, color, canopy_coverage, uniformity_score
 
 
 class PlantAIDetector:
@@ -216,7 +251,7 @@ class PlantAIDetector:
                         continue
 
                     crop = frame[by : by + bh, bx : bx + bw]
-                    status, healthy_pct, chlorosis_pct, necrosis_pct, mean_hue, color_bgr = analyze_crop_health(crop)
+                    status, healthy_pct, chlorosis_pct, necrosis_pct, mean_hue, color_bgr, canopy_coverage, uniformity_score = analyze_crop_health(crop)
 
                     # If no vegetation is found inside the detected object box, discard as false positive
                     if status == "NO VEGETATION":
@@ -233,6 +268,8 @@ class PlantAIDetector:
                             necrosis_pct=necrosis_pct,
                             mean_hue=mean_hue,
                             color_bgr=color_bgr,
+                            canopy_coverage=canopy_coverage,
+                            uniformity_score=uniformity_score,
                         )
                     )
             except Exception as e:
@@ -246,6 +283,7 @@ class PlantAIDetector:
         frame: np.ndarray,
         results: list[PlantHealthResult],
         latency_ms: float = 0.0,
+        show_bbox: bool = True,
     ) -> np.ndarray:
         """Annotate frame with bounding boxes, health status badges, and Coral Edge TPU telemetry."""
         if frame is None or frame.size == 0:
@@ -264,12 +302,17 @@ class PlantAIDetector:
             color = res.color_bgr
 
             # Main bounding box
-            cv2.rectangle(out, (bx, by), (bx + bw, by + bh), color, 2)
+            if show_bbox:
+                cv2.rectangle(out, (bx, by), (bx + bw, by + bh), color, 2)
 
-            # Header tag with user-friendly terms
-            status_text = f"{res.status} ({res.healthy_pct:.0f}%)"
-            sub_text = f"Green:{res.healthy_pct:.0f}% Yellow:{res.chlorosis_pct:.0f}% Brown:{res.necrosis_pct:.0f}%"
-            conf_text = f"{res.label} {int(res.confidence * 100)}%"
+            # Header tag with user-friendly terms & coverage
+            line1_text = f"{res.status} | Coverage: {res.canopy_coverage:.0f}%"
+            sub_text = (
+                f"Green:{res.healthy_pct:.0f}% "
+                f"Yellow:{res.chlorosis_pct:.0f}% "
+                f"Brown:{res.necrosis_pct:.0f}% "
+                f"Unif:{res.uniformity_score:.0f}%"
+            )
 
             tag_y1 = max(0, by - tag_h) if by >= tag_h else by
             tag_y2 = by if by >= tag_h else min(h, by + tag_h)
@@ -282,11 +325,114 @@ class PlantAIDetector:
 
             line1_y = tag_y1 + int(16 * (scale / 0.5))
             line2_y = tag_y1 + int(32 * (scale / 0.5))
-            cv2.putText(out, f"{conf_text} | {status_text}", (bx + 4, line1_y), font, scale, text_color, 1, cv2.LINE_AA)
+            cv2.putText(out, line1_text, (bx + 4, line1_y), font, scale, text_color, 1, cv2.LINE_AA)
             cv2.putText(out, sub_text, (bx + 4, line2_y), font, scale * 0.85, text_color, 1, cv2.LINE_AA)
 
-        # Bottom-right HUD badge (completely avoids top bounding box header tags)
+        self._draw_hud(out, latency_ms, scale)
+        return out
+
+    def draw_heatmap_overlay(
+        self,
+        frame: np.ndarray,
+        results: list[PlantHealthResult],
+        latency_ms: float = 0.0,
+    ) -> np.ndarray:
+        """Render pseudo-NDVI heatmap overlay on segmented plant foliage within bounding boxes."""
+        if frame is None or frame.size == 0:
+            return frame
+
+        out = frame.copy()
+        h, w = out.shape[:2]
+        scale = max(0.35, min(0.58, w / 700.0))
+
+        for res in results:
+            bx, by, bw, bh = res.bbox
+            if bw <= 0 or bh <= 0:
+                continue
+
+            crop = out[by : by + bh, bx : bx + bw]
+            if crop.size == 0:
+                continue
+
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            h_chan = hsv[..., 0]
+            s_chan = hsv[..., 1]
+            v_chan = hsv[..., 2]
+
+            healthy_mask = (s_chan >= 35) & (v_chan >= 35) & (h_chan >= 32) & (h_chan <= 88)
+            yellow_mask = (s_chan >= 35) & (v_chan >= 35) & (h_chan >= 18) & (h_chan < 32)
+            brown_mask = (s_chan >= 50) & (v_chan >= 35) & ((h_chan < 18) | (h_chan >= 165))
+            foliage_mask = healthy_mask | yellow_mask | brown_mask
+
+            if not np.any(foliage_mask):
+                continue
+
+            # Remap wraparound brown hues (165-180) to 0
+            effective_h = np.where(h_chan >= 165, 0, h_chan).astype(np.float32)
+            # Remap foliage hue [0, 88] linearly to [0, 255]
+            lut_indices = np.clip((effective_h / 88.0) * 255.0, 0.0, 255.0).astype(np.uint8)
+            colored_foliage = RDYLGN_LUT[lut_indices]
+
+            # Grayscale & dim non-foliage background within bbox
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            dimmed_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            dimmed_bgr = (dimmed_bgr * 0.4).astype(np.uint8)
+
+            # Apply heatmap to foliage and dimmed background to non-foliage
+            crop_out = crop.copy()
+            crop_out[~foliage_mask] = dimmed_bgr[~foliage_mask]
+            crop_out[foliage_mask] = colored_foliage[foliage_mask]
+            out[by : by + bh, bx : bx + bw] = crop_out
+
+        # Color legend bar (bottom-left corner)
+        self._draw_heatmap_legend(out, scale)
+
+        # Coral TPU telemetry HUD badge (bottom-right)
+        self._draw_hud(out, latency_ms, scale)
+
+        return out
+
+    def _draw_heatmap_legend(self, out: np.ndarray, scale: float) -> None:
+        """Draw pseudo-NDVI RdYlGn color legend bar in the bottom-left corner."""
+        h, w = out.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        bar_w = int(140 * (scale / 0.5))
+        bar_h = int(10 * (scale / 0.5))
+        pad = int(8 * (scale / 0.5))
+        bg_w = bar_w + pad * 2
+        bg_h = int(36 * (scale / 0.5))
+
+        leg_x = 10
+        leg_y = max(6, h - bg_h - 10)
+
+        # Semi-transparent background
+        overlay = out.copy()
+        cv2.rectangle(overlay, (leg_x, leg_y), (leg_x + bg_w, leg_y + bg_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
+        cv2.rectangle(out, (leg_x, leg_y), (leg_x + bg_w, leg_y + bg_h), (80, 80, 80), 1)
+
+        # Text labels
+        text_y = leg_y + int(12 * (scale / 0.5))
+        cv2.putText(out, "Stressed", (leg_x + pad, text_y), font, scale * 0.7, (0, 100, 255), 1, cv2.LINE_AA)
+        healthy_text = "Healthy"
+        (th_w, _), _ = cv2.getTextSize(healthy_text, font, scale * 0.7, 1)
+        cv2.putText(out, healthy_text, (leg_x + pad + bar_w - th_w, text_y), font, scale * 0.7, (50, 220, 50), 1, cv2.LINE_AA)
+
+        # Gradient bar
+        bar_x = leg_x + pad
+        bar_y = leg_y + int(18 * (scale / 0.5))
+        grad_1d = RDYLGN_LUT[np.linspace(0, 255, bar_w).astype(np.uint8)]
+        grad_2d = np.tile(grad_1d, (bar_h, 1, 1))
+        out[bar_y : bar_y + bar_h, bar_x : bar_x + bar_w] = grad_2d
+        cv2.rectangle(out, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (120, 120, 120), 1)
+
+    def _draw_hud(self, out: np.ndarray, latency_ms: float = 0.0, scale: float = 0.5) -> None:
+        """Draw Coral Edge TPU latency and status badge in bottom-right corner."""
+        h, w = out.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
         fps = 1000.0 / max(latency_ms, 0.1) if latency_ms > 0 else 0.0
+
         if self.is_available:
             hud_text = f"Coral TPU: {latency_ms:.1f} ms ({fps:.0f} FPS)"
             dot_color = (0, 255, 0)
@@ -307,5 +453,3 @@ class PlantAIDetector:
 
         cv2.circle(out, (hud_x + 10, hud_y + hud_bg_h // 2), max(3, int(4 * (scale / 0.5))), dot_color, -1)
         cv2.putText(out, hud_text, (hud_x + 20, hud_y + int(hud_bg_h * 0.70)), font, scale * 0.85, (255, 255, 255), 1, cv2.LINE_AA)
-
-        return out

@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from gui.modules.plant_ai import PlantAIDetector
+from gui.modules.plant_ai import PlantAIDetector, PlantHealthResult, analyze_crop_health
 from scripts.download_samples import download_real_samples, SAMPLE_DIR
 
 
@@ -50,20 +50,48 @@ def verify_pipeline():
         results, latency = detector.detect_and_analyze(img)
         dt = (time.perf_counter() - t0) * 1000.0
         latencies.append(latency if detector.is_available else dt)
-        total_detections += len(results)
 
-        annotated = detector.draw_overlay(img, results, latency)
+        # If TPU is inactive or no SSD object detected, evaluate crop directly for testing
+        eval_results = results
+        if not eval_results:
+            status, healthy_pct, yellowing_pct, browning_pct, mean_hue, color, cov, unif = analyze_crop_health(img)
+            if status != "NO VEGETATION":
+                eval_results = [
+                    PlantHealthResult(
+                        bbox=(0, 0, w, h),
+                        label="Plant Sample",
+                        confidence=1.0,
+                        status=status,
+                        healthy_pct=healthy_pct,
+                        chlorosis_pct=yellowing_pct,
+                        necrosis_pct=browning_pct,
+                        mean_hue=mean_hue,
+                        color_bgr=color,
+                        canopy_coverage=cov,
+                        uniformity_score=unif,
+                    )
+                ]
+
+        total_detections += len(eval_results)
+
+        annotated = detector.draw_overlay(img, eval_results, latency)
         out_path = output_dir / f"annotated_{img_path.name}"
         cv2.imwrite(str(out_path), annotated)
 
+        heatmap = detector.draw_heatmap_overlay(img, eval_results, latency)
+        heatmap_path = output_dir / f"heatmap_{img_path.name}"
+        cv2.imwrite(str(heatmap_path), heatmap)
+
         print(f"Image: {img_path.name} ({w}x{h})")
         print(f"  Coral TPU Latency: {latency:.2f} ms ({1000/max(latency, 0.1):.1f} FPS)")
-        print(f"  Detected Plant Canopies: {len(results)}")
-        for idx, res in enumerate(results):
+        print(f"  Evaluated Plant Canopies: {len(eval_results)}")
+        for idx, res in enumerate(eval_results):
             print(f"    [{idx+1}] {res.label} (Conf: {res.confidence*100:.1f}%) -> {res.status}")
+            print(f"        Coverage: {res.canopy_coverage:.1f}% | Uniformity: {res.uniformity_score:.1f}%")
             print(f"        Foliage Breakdown: Healthy={res.healthy_pct:.1f}% | Yellowing={res.chlorosis_pct:.1f}% | Browning={res.necrosis_pct:.1f}% | Hue={res.mean_hue:.1f}°")
             print(f"        Bounding Box (x, y, w, h): {res.bbox}")
-        print(f"  -> Saved annotated result: {out_path}\n")
+        print(f"  -> Saved annotated result: {out_path}")
+        print(f"  -> Saved heatmap result:   {heatmap_path}\n")
 
     avg_lat = sum(latencies) / len(latencies) if latencies else 0.0
     print("=" * 70)

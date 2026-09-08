@@ -401,30 +401,50 @@ class MainWindow(tk.Tk):
         self.water_btns: list[tk.Checkbutton] = []
         self.rebuild_relays(4)
 
+        self.live_capture_frame = tk.Frame(right_frame, bg="white")
+        self.live_capture_frame.place(x=0, y=y_pos(3), width=margin_w, height=btn_h)
+        self.live_capture_frame.grid_columnconfigure(0, weight=1, uniform="row_btn")
+        self.live_capture_frame.grid_columnconfigure(1, weight=1, uniform="row_btn")
+        self.live_capture_frame.grid_rowconfigure(0, weight=1)
+
         self.live_var = tk.IntVar(value=1)
         self.ckb_live = tk.Checkbutton(
-            right_frame, text="Live", font=("arial", 32, "bold"), bg="white",
+            self.live_capture_frame, text="Live", font=("arial", 22, "bold"), bg="white",
             selectcolor="yellow", bd=4, indicatoron=False, variable=self.live_var,
             command=self._on_live_toggle
         )
-        self.ckb_live.place(x=0, y=y_pos(3), width=margin_w, height=btn_h)
+        self.ckb_live.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
 
         self.btn_capture = tk.Button(
-            right_frame, text="Capture", font=("arial", 32, "bold"), bg="white", fg="black",
+            self.live_capture_frame, text="Capture", font=("arial", 22, "bold"), bg="white", fg="black",
             activebackground="white", activeforeground="black", bd=4, command=self._on_capture
         )
-        self.btn_capture.place(x=0, y=y_pos(4), width=margin_w, height=btn_h)
+        self.btn_capture.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
         self._bind_capture_click_hold()
+
+        self.ai_heat_frame = tk.Frame(right_frame, bg="white")
+        self.ai_heat_frame.place(x=0, y=y_pos(4), width=margin_w, height=btn_h)
+        self.ai_heat_frame.grid_columnconfigure(0, weight=1, uniform="row_btn")
+        self.ai_heat_frame.grid_columnconfigure(1, weight=1, uniform="row_btn")
+        self.ai_heat_frame.grid_rowconfigure(0, weight=1)
 
         self.plant_ai_var = tk.IntVar(value=0)
         self.ckb_plant_ai = tk.Checkbutton(
-            right_frame, text="Plant AI", font=("arial", 30, "bold"), bg="white",
+            self.ai_heat_frame, text="Plant AI", font=("arial", 22, "bold"), bg="white",
             selectcolor="#ffb703", bd=4, indicatoron=False, variable=self.plant_ai_var,
             command=self._on_plant_ai_toggle
         )
-        self.ckb_plant_ai.place(x=0, y=y_pos(5), width=margin_w, height=btn_h)
+        self.ckb_plant_ai.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
 
-        self._build_gimbal_panel(right_frame, margin_w, y_pos(6), self.scr_h - y_pos(6) - gap_y)
+        self.heatmap_var = tk.IntVar(value=0)
+        self.ckb_heatmap = tk.Checkbutton(
+            self.ai_heat_frame, text="Heatmap", font=("arial", 22, "bold"), bg="white",
+            selectcolor="#e63946", bd=4, indicatoron=False, variable=self.heatmap_var,
+            command=self._on_heatmap_toggle
+        )
+        self.ckb_heatmap.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
+
+        self._build_gimbal_panel(right_frame, margin_w, y_pos(5), self.scr_h - y_pos(5) - gap_y)
 
         self.plotter = PlotWindow(self, lambda: self.telemetry)
         self._build_menu()
@@ -462,14 +482,19 @@ class MainWindow(tk.Tk):
         self.lbl_soil_moist.pack(side=tk.LEFT, padx=14)
 
     def _build_gimbal_panel(self, parent: tk.Frame, width: int, y: int, height: int) -> None:
-        self.gimbal_frame = tk.LabelFrame(
-            parent, text=" GIMBAL ", font=("arial", 20, "bold"),
-            fg="#0d6efd", bg="#f8f9fa", bd=3, relief=tk.GROOVE
+        self.gimbal_frame = tk.Frame(
+            parent, bg="#f8f9fa", bd=3, relief=tk.GROOVE
         )
         self.gimbal_frame.place(x=0, y=y, width=width, height=height)
         for i in range(3):
             self.gimbal_frame.grid_columnconfigure(i, weight=1, uniform="g_col")
             self.gimbal_frame.grid_rowconfigure(i, weight=1, uniform="g_row")
+
+        self.lbl_gimbal = tk.Label(
+            self.gimbal_frame, text="GIMBAL", font=("arial", 18, "bold"),
+            fg="#0d6efd", bg="#f8f9fa"
+        )
+        self.lbl_gimbal.grid(row=0, column=0, sticky="nsew", padx=4, pady=2)
 
         gcfg = {
             "font": ("arial", 28, "bold"), "bd": 4, "bg": "#495057", "fg": "white",
@@ -549,8 +574,9 @@ class MainWindow(tk.Tk):
             activeforeground="black" if live else "dark grey"
         )
 
-    def _on_plant_ai_toggle(self) -> None:
-        if self.plant_ai_var.get():
+    def _update_tpu_status_label(self) -> None:
+        ai_active = bool(self.plant_ai_var.get() or self.heatmap_var.get())
+        if ai_active:
             if self.plant_ai.is_available:
                 self.lbl_tpu_status.config(text=f"TPU: Active ({self.plant_ai.last_latency_ms:.1f} ms)", fg="#06d6a0")
             else:
@@ -560,6 +586,12 @@ class MainWindow(tk.Tk):
                 self.lbl_tpu_status.config(text="TPU: Ready", fg="#06d6a0")
             else:
                 self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
+
+    def _on_plant_ai_toggle(self) -> None:
+        self._update_tpu_status_label()
+
+    def _on_heatmap_toggle(self) -> None:
+        self._update_tpu_status_label()
 
     def _on_capture(self) -> None:
         if self.live_var.get() and self.camera.is_available:
@@ -711,19 +743,34 @@ class MainWindow(tk.Tk):
                 except Exception:
                     time.sleep(0.1)
 
+    def _apply_plant_ai_overlays(self, frame: np.ndarray) -> tuple[np.ndarray, float | None]:
+        pai = bool(self.plant_ai_var.get())
+        hmap = bool(self.heatmap_var.get())
+        if not (pai or hmap):
+            return frame, None
+
+        results, latency = self.plant_ai.detect_and_analyze(frame)
+        if pai and not hmap:
+            out = self.plant_ai.draw_overlay(frame, results, latency, show_bbox=True)
+        elif not pai and hmap:
+            out = self.plant_ai.draw_heatmap_overlay(frame, results, latency)
+        else:
+            # Both ON: heatmap colormap overlay on plant pixels + health badges (no bbox rectangles)
+            hmap_frame = self.plant_ai.draw_heatmap_overlay(frame, results, latency)
+            out = self.plant_ai.draw_overlay(hmap_frame, results, latency, show_bbox=False)
+
+        return out, latency
+
     def _camera_loop(self) -> None:
         if self.live_var.get() and self.camera.is_available:
             frame = self.camera.capture_array()
             if frame is not None:
-                if self.plant_ai_var.get() == 1:
-                    results, latency = self.plant_ai.detect_and_analyze(frame)
-                    display_frame = self.plant_ai.draw_overlay(frame, results, latency)
+                display_frame, latency = self._apply_plant_ai_overlays(frame)
+                if latency is not None:
                     if self.plant_ai.is_available:
                         self.lbl_tpu_status.config(text=f"TPU: Active ({latency:.1f} ms)", fg="#06d6a0")
                     else:
                         self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
-                else:
-                    display_frame = frame
                 self.display_image(display_frame)
                 if self.flag_capture:
                     out = DATA_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:19]}.jpg"
@@ -772,10 +819,13 @@ class MainWindow(tk.Tk):
         if p:
             img = cv2.imread(p)
             if img is not None:
-                if self.plant_ai_var.get() == 1:
-                    results, latency = self.plant_ai.detect_and_analyze(img)
-                    img = self.plant_ai.draw_overlay(img, results, latency)
-                self.display_image(img)
+                display_frame, latency = self._apply_plant_ai_overlays(img)
+                if latency is not None:
+                    if self.plant_ai.is_available:
+                        self.lbl_tpu_status.config(text=f"TPU: Active ({latency:.1f} ms)", fg="#06d6a0")
+                    else:
+                        self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
+                self.display_image(display_frame)
             else:
                 self.display_image(Image.open(p))
 

@@ -34,12 +34,25 @@ URLS = {
         "https://raw.githubusercontent.com/spMohanty/PlantVillage-Dataset/master/raw/color/"
         "Potato___Late_blight/0051e5e8-d1c4-4a84-bf3a-a426cdad6285___RS_LB%204640.JPG"
     ),
+    # Real whole potted plant images for object detection & canopy segmentation
+    "potted_plant_monstera.jpg": (
+        "https://images.unsplash.com/photo-1485955900006-10f4d324d411?w=640&q=80"
+    ),
+    "potted_plant_succulent.jpg": (
+        "https://images.unsplash.com/photo-1509423350716-97f9360b4e09?w=640&q=80"
+    ),
+    "potted_plant_indoor.jpg": (
+        "https://images.unsplash.com/photo-1545241047-6083a3684587?w=640&q=80"
+    ),
+    "potted_plant_greenhouse.jpg": (
+        "https://images.unsplash.com/photo-1459411552884-841db9b3cc2a?w=640&q=80"
+    ),
 }
 
 
 def download_real_samples() -> list[Path]:
     """Download authentic real-world plant dataset images. No synthetic images used."""
-    headers = {"User-Agent": "Mozilla/5.0 (CEA Irrigation Real Dataset Fetcher/1.0)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     downloaded_paths = []
 
     for filename, url in URLS.items():
