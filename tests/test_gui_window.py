@@ -35,6 +35,9 @@ def test_mainwindow_initial_state(headless_app):
     assert len(app.water_vars) == 4
     assert len(app.water_btns) == 4
 
+    assert hasattr(app, "btn_home")
+    assert app.btn_home["text"] == "Home"
+
     # Relays should be disabled when in AUTO mode
     for btn in app.water_btns:
         assert str(btn["state"]) == tk.DISABLED
@@ -163,8 +166,8 @@ def test_mainwindow_on_closing(headless_app):
         app.on_closing()
         # Should shut down all pumps with 0000
         app.ser.write.assert_any_call(b"0000\n")
-        # Should recenter gimbal
-        app.ser.write.assert_any_call(b"c\n")
+        # Should home gimbal
+        app.ser.write.assert_any_call(b"h\n")
         # Should close serial
         app.ser.close.assert_called_once()
         # Should stop camera

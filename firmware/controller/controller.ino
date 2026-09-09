@@ -27,7 +27,7 @@ const unsigned long SERVO_DETACH_DELAY = 1500; // ms before auto-detach (prevent
 
 struct ServoConfig {
   Servo         servo;
-  int           pin, minAngle, maxAngle, center, current;
+  int           pin, minAngle, maxAngle, homeAngle, current;
   unsigned long moveTime;
   bool          active;
 };
@@ -35,8 +35,8 @@ struct ServoConfig {
 #define PAN  0
 #define TILT 1
 ServoConfig servos[] = {
-  { Servo(),  9, 0, 130, 65, 65, 0, false },  // Pan:  0-130°, center 65°
-  { Servo(), 10, 0,  90, 60, 60, 0, false },  // Tilt: 0-90°,  center 60°
+  { Servo(),  9, 0, 130, 55, 55, 0, false },  // Pan:  0-130°, home 55°
+  { Servo(), 10, 0,  60, 30, 30, 0, false },  // Tilt: 0-60°,  home 30°
 };
 
 void moveServo(int idx, int angle) {
@@ -274,11 +274,11 @@ void handleSerialCommands() {
 
   char firstChar = cmd.charAt(0);
 
-  // Re-center servos
-  if (cmd.equalsIgnoreCase("c")) {
-    moveServo(PAN,  servos[PAN].center);
-    moveServo(TILT, servos[TILT].center);
-    Serial.println("ACK: Re-centered to Pan 65 deg, Tilt 60 deg");
+  // Home servos (supports 'h' or legacy 'c')
+  if (cmd.equalsIgnoreCase("h") || cmd.equalsIgnoreCase("c")) {
+    moveServo(PAN,  servos[PAN].homeAngle);
+    moveServo(TILT, servos[TILT].homeAngle);
+    Serial.println("ACK: Homed to Pan 55 deg, Tilt 30 deg");
     return;
   }
 
@@ -299,7 +299,7 @@ void handleSerialCommands() {
       Serial.println(" deg");
     } else {
       if (servoIdx == PAN) Serial.println("ERR: Missing angle for pan. Use 'p <0-130>'");
-      else                 Serial.println("ERR: Missing angle for tilt. Use 't <0-90>'");
+      else                 Serial.println("ERR: Missing angle for tilt. Use 't <0-60>'");
     }
     return;
   }
@@ -315,7 +315,7 @@ void handleSerialCommands() {
 
   Serial.print("ERR: Unknown command '");
   Serial.print(cmd);
-  Serial.println("'. Use 'p <0-130>', 't <0-90>', 'c', or bitmask (e.g. '0000')");
+  Serial.println("'. Use 'p <0-130>', 't <0-60>', 'h', 'c', or bitmask (e.g. '0000')");
 }
 
 // ── Setup & Loop ─────────────────────────────────────────────────────
@@ -330,8 +330,8 @@ void setup() {
   }
   relayStates[NUM_RELAYS] = '\0';
 
-  moveServo(PAN,  servos[PAN].center);
-  moveServo(TILT, servos[TILT].center);
+  moveServo(PAN,  servos[PAN].homeAngle);
+  moveServo(TILT, servos[TILT].homeAngle);
 
   Serial.println("FORMAT: soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,val,relays,mask,pan,val,tilt,val");
 

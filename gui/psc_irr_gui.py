@@ -55,10 +55,10 @@ WET_BASELINES = [136.0, 92.0, 159.0, 160.0]
 DATA_DIR = Path("Data")
 DATA_DIR.mkdir(exist_ok=True)
 
-# Hardware Safety Bounds and Centers
+# Hardware Safety Bounds and Home
 PAN_MIN, PAN_MAX = 0, 130
-TILT_MIN, TILT_MAX = 0, 90
-PAN_CENTER, TILT_CENTER = 65, 60
+TILT_MIN, TILT_MAX = 0, 60
+PAN_HOME, TILT_HOME = 55, 30
 GIMBAL_STEP = 5  # degrees per nudge click
 
 
@@ -101,8 +101,8 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
         "humidity": None,
         "light": None,
         "relays": "0000",
-        "pan": PAN_CENTER,
-        "tilt": TILT_CENTER,
+        "pan": PAN_HOME,
+        "tilt": TILT_HOME,
     }
     try:
         i, n = 0, len(tokens)
@@ -349,9 +349,9 @@ class MainWindow(tk.Tk):
         self.telemetry = {
             "soil": [], "moisture_pct": [], "soil_temp": None,
             "temp": None, "humidity": None, "light": None,
-            "relays": "0000", "pan": PAN_CENTER, "tilt": TILT_CENTER
+            "relays": "0000", "pan": PAN_HOME, "tilt": TILT_HOME
         }
-        self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
+        self.current_pan, self.current_tilt = PAN_HOME, TILT_HOME
         self._repeat_job: str | None = None
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.plant_ai = PlantAIDetector()
@@ -514,12 +514,12 @@ class MainWindow(tk.Tk):
             btn.bind("<Leave>", self._stop_repeat)
             setattr(self, attr, btn)
 
-        self.btn_center = tk.Button(
-            self.gimbal_frame, text="⌖ Center", font=("arial", 18, "bold"), bd=4,
+        self.btn_home = tk.Button(
+            self.gimbal_frame, text="Home", font=("arial", 18, "bold"), bd=4,
             bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white",
-            command=self.recenter_gimbal
+            command=self.home_gimbal
         )
-        self.btn_center.grid(row=1, column=1, sticky="nsew", padx=4, pady=2)
+        self.btn_home.grid(row=1, column=1, sticky="nsew", padx=4, pady=2)
 
     def _bind_capture_click_hold(self) -> None:
         def on_press(event=None):
@@ -653,10 +653,10 @@ class MainWindow(tk.Tk):
         self.current_tilt = new_tilt
         self.send_command(f"t {new_tilt}")
 
-    def recenter_gimbal(self) -> None:
+    def home_gimbal(self) -> None:
         self._stop_repeat()
-        self.current_pan, self.current_tilt = PAN_CENTER, TILT_CENTER
-        self.send_command("c")
+        self.current_pan, self.current_tilt = PAN_HOME, TILT_HOME
+        self.send_command("h")
 
     def _init_serial(self) -> None:
         port = find_arduino_port()
@@ -707,7 +707,7 @@ class MainWindow(tk.Tk):
                 ah = f"{data['humidity']:.1f}" if data.get("humidity") is not None else "null"
                 lv = str(data["light"]) if data.get("light") is not None else "null"
                 row = [datetime.now().strftime("%Y-%m-%d %H:%M:%S")] + s_raw + s_pct + [
-                    st, at, ah, lv, data.get("relays", "0000"), str(data.get("pan", PAN_CENTER)), str(data.get("tilt", TILT_CENTER))
+                    st, at, ah, lv, data.get("relays", "0000"), str(data.get("pan", PAN_HOME)), str(data.get("tilt", TILT_HOME))
                 ]
                 f.write(",".join(row) + "\n")
         except Exception:
@@ -844,7 +844,7 @@ class MainWindow(tk.Tk):
         self.stop_threads.set()
         try:
             self.send_bitmask("0" * max(1, len(self.water_vars)))
-            self.send_command("c")  # direct center (reader thread already stopped)
+            self.send_command("h")  # direct home (reader thread already stopped)
             time.sleep(0.3)
         except Exception as e:
             print(f"[Shutdown] Command error: {e}")

@@ -97,7 +97,7 @@ def test_ignore_headers_and_acks():
 
 def test_bounds():
     assert PAN_MIN == 0 and PAN_MAX == 130
-    assert TILT_MIN == 0 and TILT_MAX == 90
+    assert TILT_MIN == 0 and TILT_MAX == 60
     print("[PASS] test_bounds")
 
 

@@ -10,11 +10,11 @@ from gui.psc_irr_gui import (
     DATA_DIR,
     DRY_BASELINES,
     GIMBAL_STEP,
-    PAN_CENTER,
+    PAN_HOME,
     PAN_MAX,
     PAN_MIN,
     SOIL_WATER_SETPOINT,
-    TILT_CENTER,
+    TILT_HOME,
     TILT_MAX,
     TILT_MIN,
     WET_BASELINES,
@@ -260,8 +260,8 @@ def test_log_telemetry_csv(tmp_path, monkeypatch):
 
 def test_constants_and_bounds():
     assert PAN_MIN == 0 and PAN_MAX == 130
-    assert TILT_MIN == 0 and TILT_MAX == 90
-    assert PAN_CENTER == 65 and TILT_CENTER == 60
+    assert TILT_MIN == 0 and TILT_MAX == 60
+    assert PAN_HOME == 55 and TILT_HOME == 30
     assert GIMBAL_STEP == 5
     assert BAUDRATE == 9600
     assert SOIL_WATER_SETPOINT == 40.0
@@ -293,16 +293,16 @@ def test_gimbal_nudging():
 
                     # Tilt limits
                     app._last_servo_cmd = 0.0
-                    app.current_tilt = 88
-                    app.nudge_tilt(10)  # should cap at TILT_MAX (90)
-                    assert app.current_tilt == 90
-                    app.ser.write.assert_called_with(b"t 90\n")
+                    app.current_tilt = 58
+                    app.nudge_tilt(10)  # should cap at TILT_MAX (60)
+                    assert app.current_tilt == 60
+                    app.ser.write.assert_called_with(b"t 60\n")
 
-                    # Recenter
+                    # Home
                     app._last_servo_cmd = 0.0
-                    app.recenter_gimbal()
-                    assert app.current_pan == PAN_CENTER
-                    assert app.current_tilt == TILT_CENTER
-                    app.ser.write.assert_called_with(b"c\n")
+                    app.home_gimbal()
+                    assert app.current_pan == PAN_HOME
+                    assert app.current_tilt == TILT_HOME
+                    app.ser.write.assert_called_with(b"h\n")
 
                     app.destroy()

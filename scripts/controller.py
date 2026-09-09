@@ -10,9 +10,9 @@ Features:
   - Interactive shell supporting:
       * Relay bitmasks (e.g. '0000', '1000', '01')
       * Pan angle commands (e.g. 'p 65', 'p 0', 'p 130')
-      * Tilt angle commands (e.g. 't 60', 't 45', 't 90')
-      * Servo re-centering ('c')
-      * Clean exit ('exit', 'q') with relay shutoff and servo centering.
+      * Tilt angle commands (e.g. 't 30', 't 45', 't 60')
+      * Servo home ('h', 'c')
+      * Clean exit ('exit', 'q') with relay shutoff and servo homing.
 
 Usage:
     uv run python scripts/controller.py
@@ -29,7 +29,7 @@ import serial.tools.list_ports
 
 # Hardware safety bounds
 PAN_MIN, PAN_MAX = 0, 130
-TILT_MIN, TILT_MAX = 0, 90
+TILT_MIN, TILT_MAX = 0, 60
 
 
 def find_arduino_port() -> str | None:
@@ -290,10 +290,10 @@ def main():
     print("               CEA IRRIGATION CONTROLLER INTERACTIVE SHELL")
     print("=" * 68)
     print("  * Relays Bitmask: Type 1-4 digits (e.g. '0000', '1000', '1111')")
-    print("  * Pan Control:    'p <0-130>'    (e.g. 'p 65', 'p 0', 'p 130')")
-    print("  * Tilt Control:   't <0-90>'     (e.g. 't 60', 't 45', 't 90')")
-    print("  * Re-center:      'c'            (Resets Pan 65, Tilt 60)")
-    print("  * Exit:           'exit' / 'q'   (Turns off relays, centers servos, exits)")
+    print("  * Pan Control:    'p <0-130>'    (e.g. 'p 55', 'p 0', 'p 130')")
+    print("  * Tilt Control:   't <0-60>'     (e.g. 't 30', 't 45', 't 60')")
+    print("  * Home:           'h' / 'c'      (Resets Pan 55, Tilt 30)")
+    print("  * Exit:           'exit' / 'q'   (Turns off relays, homes servos, exits)")
     print("=" * 68 + "\n")
 
     stop_event = threading.Event()
@@ -329,16 +329,16 @@ def main():
 
             # Exit command
             if cmd_lower in ("exit", "quit", "q"):
-                print("Turning off relays and centering servos before exit...")
+                print("Turning off relays and homing servos before exit...")
                 send_command(ser, "0000")
                 time.sleep(0.1)
-                send_command(ser, "c")
+                send_command(ser, "h")
                 time.sleep(0.3)
                 break
 
-            # Center command
-            if cmd_lower == "c":
-                send_command(ser, "c")
+            # Home command ('h' or legacy 'c')
+            if cmd_lower in ("h", "c"):
+                send_command(ser, "h")
                 continue
 
             # Pan command ('p <angle>' or 'P <angle>')
@@ -366,7 +366,7 @@ def main():
                     send_command(ser, f"t {angle}")
                     continue
                 else:
-                    print("[Error] Invalid tilt command. Use 't <0-90>' (e.g. 't 60').")
+                    print("[Error] Invalid tilt command. Use 't <0-60>' (e.g. 't 30').")
                     continue
 
             # Bitmask command: 1 to 4 digits of '0' and '1'
@@ -375,14 +375,14 @@ def main():
                 continue
 
             print(f"[Warning] Unknown input '{cmd}'.")
-            print("  Allowed: 'p <0-130>', 't <0-90>', 'c', bitmask (e.g. '0000'), or 'exit'.")
+            print("  Allowed: 'p <0-130>', 't <0-60>', 'h', 'c', bitmask (e.g. '0000'), or 'exit'.")
 
     except (KeyboardInterrupt, EOFError):
-        print("\nInterrupted. Turning off relays and centering servos...")
+        print("\nInterrupted. Turning off relays and homing servos...")
         try:
             send_command(ser, "0000")
             time.sleep(0.1)
-            send_command(ser, "c")
+            send_command(ser, "h")
             time.sleep(0.2)
         except Exception:
             pass

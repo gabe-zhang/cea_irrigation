@@ -14,3 +14,5 @@ Data/
 img_bbox.jpg
 img_mask.jpg
 
+# Development files
+TODOs.md
