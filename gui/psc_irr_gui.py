@@ -20,7 +20,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import csv
+from datetime import datetime, timedelta
 from pathlib import Path
 import signal
 import sys
@@ -33,6 +34,7 @@ import cv2
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.animation as animation
+import matplotlib.dates as mdates
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
@@ -50,10 +52,18 @@ except (ImportError, ModuleNotFoundError):
 # Constants & Soil Calibration
 BAUDRATE = 9600
 SOIL_WATER_SETPOINT = 40.0  # Trigger pump below this moisture % in AUTO mode
+SCHEDULED_TARGET_PCT = 80.0  # Scheduled irrigation shuts off when channel reaches 80%
+SCHEDULED_MAX_WATERING_SEC = 180  # 3-minute hard safety timeout
 DRY_BASELINES = [432.0, 408.0, 427.0, 424.0]
 WET_BASELINES = [136.0, 92.0, 159.0, 160.0]
+
 DATA_DIR = Path("Data")
-DATA_DIR.mkdir(exist_ok=True)
+TELEMETRY_DIR = DATA_DIR / "telemetry"
+IMAGES_DIR = DATA_DIR / "images"
+SCHEDULED_WATERING_DIR = IMAGES_DIR / "scheduled_watering"
+
+for _p in (DATA_DIR, TELEMETRY_DIR, IMAGES_DIR, SCHEDULED_WATERING_DIR):
+    _p.mkdir(parents=True, exist_ok=True)
 
 # Hardware Safety Bounds and Home
 PAN_MIN, PAN_MAX = 0, 130
@@ -61,10 +71,41 @@ TILT_MIN, TILT_MAX = 0, 60
 PAN_HOME, TILT_HOME = 55, 30
 GIMBAL_STEP = 5  # degrees per nudge click
 
+# Interval mapping
+DATA_INTERVAL_MAP = {"10s": 10_000, "1min": 60_000, "1hr": 3_600_000}
+IMAGE_INTERVAL_MAP = {"sec": 1_000, "min": 60_000, "hr": 3_600_000, "day": 86_400_000}
 
-def _safe_float(val: str) -> float | None:
+
+def parse_interval_to_ms(val: str, default_ms: int = 10_000) -> int:
+    """Parse interval string into milliseconds.
+    
+    Supports '10s', '1min', '1hr', 'sec', 'min', 'hr', 'day', etc.
+    """
+    if not val:
+        return default_ms
+    s = str(val).strip().lower()
+    mapping = {
+        "sec": 1_000,
+        "1s": 1_000,
+        "10s": 10_000,
+        "min": 60_000,
+        "1m": 60_000,
+        "1min": 60_000,
+        "hr": 3_600_000,
+        "1h": 3_600_000,
+        "1hr": 3_600_000,
+        "day": 86_400_000,
+        "1day": 86_400_000,
+        "24hr": 86_400_000,
+    }
+    return mapping.get(s, default_ms)
+
+
+def _safe_float(val: str | None) -> float | None:
     """Convert string to float, treating 'null', 'none', 'nan', or empty as None."""
-    s = val.strip().lower()
+    if val is None:
+        return None
+    s = str(val).strip().lower()
     if not s or s in ("null", "none", "nan"):
         return None
     try:
@@ -73,9 +114,11 @@ def _safe_float(val: str) -> float | None:
         return None
 
 
-def _safe_int(val: str) -> int | None:
+def _safe_int(val: str | None) -> int | None:
     """Convert string to int, treating 'null', 'none', 'nan', or empty as None."""
-    s = val.strip().lower()
+    if val is None:
+        return None
+    s = str(val).strip().lower()
     if not s or s in ("null", "none", "nan"):
         return None
     try:
@@ -145,9 +188,6 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
         return None
 
 
-
-
-
 def raw_to_moisture(raw: float | int | None, ch: int) -> float | None:
     """Convert raw soil ADC to 0-100% moisture percentage using two-point dry/wet calibration."""
     if raw is None:
@@ -173,13 +213,102 @@ def find_arduino_port() -> str | None:
     return ports[0].device if ports else None
 
 
-class PlotWindow:
-    """Dynamic Matplotlib window displaying 60s soil moisture, temperatures, and humidity telemetry."""
+def read_historical_telemetry(telemetry_dir: Path, range_mode: str, now: datetime | None = None) -> dict:
+    """Read telemetry CSV records from telemetry_dir matching range_mode ('day', 'week', 'month').
+    
+    Returns:
+        dict with keys: 'timestamps', 'moisture', 'soil_temp', 'air_temp', 'humidity'
+    """
+    if now is None:
+        now = datetime.now()
 
-    def __init__(self, master: tk.Tk, get_telemetry_fn) -> None:
+    mode = range_mode.strip().lower()
+    if mode == "day":
+        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif mode == "week":
+        cutoff = now - timedelta(days=7)
+    elif mode == "month":
+        cutoff = now - timedelta(days=30)
+    else:
+        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    timestamps: list[datetime] = []
+    moistures: list[list[float | None]] = [[], [], [], []]
+    soil_temps: list[float | None] = []
+    air_temps: list[float | None] = []
+    humidities: list[float | None] = []
+
+    if not telemetry_dir.exists():
+        return {
+            "timestamps": timestamps,
+            "moisture": moistures,
+            "soil_temp": soil_temps,
+            "air_temp": air_temps,
+            "humidity": humidities,
+        }
+
+    csv_files = sorted(telemetry_dir.glob("telemetry_*.csv"))
+    rows: list[tuple[datetime, list[float | None], float | None, float | None, float | None]] = []
+
+    for fpath in csv_files:
+        try:
+            with fpath.open("r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if not header:
+                    continue
+                for row in reader:
+                    if not row or len(row) < 12:
+                        continue
+                    ts_str = row[0].strip()
+                    dt = None
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+                        try:
+                            dt = datetime.strptime(ts_str, fmt)
+                            break
+                        except ValueError:
+                            pass
+                    if dt is None or dt < cutoff:
+                        continue
+                    
+                    m1 = _safe_float(row[5])
+                    m2 = _safe_float(row[6])
+                    m3 = _safe_float(row[7])
+                    m4 = _safe_float(row[8])
+                    st = _safe_float(row[9])
+                    at = _safe_float(row[10])
+                    rh = _safe_float(row[11])
+                    rows.append((dt, [m1, m2, m3, m4], st, at, rh))
+        except Exception as e:
+            print(f"[Telemetry Reader] Error reading {fpath.name}: {e}")
+
+    rows.sort(key=lambda x: x[0])
+    for dt, m_list, st, at, rh in rows:
+        timestamps.append(dt)
+        for i in range(4):
+            moistures[i].append(m_list[i])
+        soil_temps.append(st)
+        air_temps.append(at)
+        humidities.append(rh)
+
+    return {
+        "timestamps": timestamps,
+        "moisture": moistures,
+        "soil_temp": soil_temps,
+        "air_temp": air_temps,
+        "humidity": humidities,
+    }
+
+
+class PlotWindow:
+    """Dynamic Matplotlib window displaying 60s live or historical telemetry."""
+
+    def __init__(self, master: tk.Tk, get_telemetry_fn, range_var: tk.StringVar | None = None) -> None:
         self.master = master
         self.get_telemetry = get_telemetry_fn
+        self.range_var = range_var or tk.StringVar(value="min")
         self.window: tk.Toplevel | None = None
+        self.canvas_widget: FigureCanvasTkAgg | None = None
         self.ani: animation.FuncAnimation | None = None
         self.max_ch = 4
         self.colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd"]
@@ -190,6 +319,19 @@ class PlotWindow:
         self.ydata_rh: list[float] = []
 
         self.fig = Figure(figsize=(15.0, 10.5), dpi=100)
+        self.lines_moist = []
+        self.line_temp = None
+        self.line_soil_temp = None
+        self.line_rh = None
+        self.ax_moist = None
+        self.ax_temp = None
+        self.ax_rh = None
+
+        self._init_live_figure()
+        self._trace_id = self.range_var.trace_add("write", self._on_range_changed)
+
+    def _init_live_figure(self) -> None:
+        self.fig.clf()
         self.fig.suptitle("Soil Moisture & Environmental Telemetry (Last 60s)", fontsize=24, fontweight="bold")
 
         # Top Plot: Soil Moisture (0-100%)
@@ -230,7 +372,6 @@ class PlotWindow:
         self.ax_rh.set_ylabel("Relative Humidity (%)", fontsize=20, fontweight="bold", color="#00838f")
         self.ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=18)
 
-        # Combined Legend for Temperatures and RH
         self.ax_temp.legend(
             [self.line_temp, self.line_soil_temp, self.line_rh],
             ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"],
@@ -242,6 +383,103 @@ class PlotWindow:
 
         self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
         self.fig.subplots_adjust(hspace=0.35)
+
+    def _render_historical_figure(self, mode: str) -> None:
+        self.fig.clf()
+        hist = read_historical_telemetry(TELEMETRY_DIR, mode)
+        ts = hist["timestamps"]
+        if not ts:
+            ax = self.fig.add_subplot(1, 1, 1)
+            ax.text(
+                0.5, 0.5,
+                f"No historical telemetry records found for range: '{mode}'.\nLogs are saved to {TELEMETRY_DIR}/",
+                ha="center", va="center", fontsize=20, color="#6c757d", fontweight="bold"
+            )
+            ax.axis("off")
+            self.fig.suptitle(f"Soil Moisture & Environmental Telemetry ({mode.capitalize()})", fontsize=24, fontweight="bold")
+            self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
+            return
+
+        self.fig.suptitle(f"Soil Moisture & Environmental Telemetry ({mode.capitalize()})", fontsize=24, fontweight="bold")
+        ax_moist = self.fig.add_subplot(2, 1, 1)
+        for i, c in enumerate(self.colors):
+            y_vals = [v if v is not None else np.nan for v in hist["moisture"][i]]
+            ax_moist.plot(ts, y_vals, color=c, linewidth=2.8, label=f"S{i+1}")
+
+        ax_moist.set_ylim(0, 100)
+        ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
+        ax_moist.tick_params(axis="both", labelsize=16)
+        ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
+        ax_moist.legend(loc="upper left", fontsize=16, ncol=4, framealpha=0.92)
+
+        ax_temp = self.fig.add_subplot(2, 1, 2, sharex=ax_moist)
+        ax_rh = ax_temp.twinx()
+
+        y_temp = [v if v is not None else np.nan for v in hist["air_temp"]]
+        y_soil = [v if v is not None else np.nan for v in hist["soil_temp"]]
+        y_rh = [v if v is not None else np.nan for v in hist["humidity"]]
+
+        (l_t,) = ax_temp.plot(ts, y_temp, color="#d62728", linewidth=2.8, label="Air Temp (°C)")
+        (l_s,) = ax_temp.plot(ts, y_soil, color="#d95f02", linewidth=2.8, linestyle="--", label="Soil Temp (°C)")
+        (l_rh,) = ax_rh.plot(ts, y_rh, color="#00838f", linewidth=2.8, label="RH (%)")
+
+        ax_temp.set_ylim(0, 50)
+        ax_temp.set_ylabel("Temperature (°C)", fontsize=20, fontweight="bold", color="#d62728")
+        ax_temp.tick_params(axis="both", labelsize=16)
+        ax_temp.tick_params(axis="y", labelcolor="#d62728")
+        ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
+
+        ax_rh.set_ylim(0, 100)
+        ax_rh.set_ylabel("Relative Humidity (%)", fontsize=20, fontweight="bold", color="#00838f")
+        ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=16)
+
+        ax_temp.legend([l_t, l_s, l_rh], ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"], loc="upper left", fontsize=16, ncol=3, framealpha=0.92)
+
+        if mode == "day":
+            ax_temp.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        elif mode == "week":
+            ax_temp.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d\n%H:%M"))
+        else:  # month
+            ax_temp.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+        ax_temp.set_xlabel("Date / Time", fontsize=18, fontweight="bold")
+
+        self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
+        self.fig.subplots_adjust(hspace=0.35)
+
+    def _render_current_mode(self) -> None:
+        mode = self.range_var.get().strip().lower()
+        if mode == "min":
+            self.xdata.clear()
+            for y_m in self.ydata_moist:
+                y_m.clear()
+            self.ydata_soil_temp.clear()
+            self.ydata_temp.clear()
+            self.ydata_rh.clear()
+
+            self._init_live_figure()
+            if self.canvas_widget:
+                self.canvas_widget.draw_idle()
+            if self.ani and self.ani.event_source:
+                self.ani.event_source.stop()
+            self.ani = animation.FuncAnimation(
+                self.fig, self._update, self._gen, interval=500, cache_frame_data=False
+            )
+            if self.window:
+                self.window.title("Soil Moisture & Environmental Telemetry (Last 60s)")
+        else:
+            if self.ani and self.ani.event_source:
+                self.ani.event_source.stop()
+            self.ani = None
+
+            self._render_historical_figure(mode)
+            if self.canvas_widget:
+                self.canvas_widget.draw_idle()
+            if self.window:
+                self.window.title(f"Historical Telemetry ({mode.capitalize()})")
+
+    def _on_range_changed(self, *args) -> None:
+        if self.window and tk.Toplevel.winfo_exists(self.window):
+            self._render_current_mode()
 
     def _update(self, data: tuple):
         if len(data) >= 5:
@@ -271,11 +509,15 @@ class PlotWindow:
             self.ydata_rh.append(rh if rh is not None else np.nan)
 
         for i in range(self.max_ch):
-            self.lines_moist[i].set_data(self.xdata, self.ydata_moist[i])
+            if i < len(self.lines_moist):
+                self.lines_moist[i].set_data(self.xdata, self.ydata_moist[i])
 
-        self.line_temp.set_data(self.xdata, self.ydata_temp)
-        self.line_soil_temp.set_data(self.xdata, self.ydata_soil_temp)
-        self.line_rh.set_data(self.xdata, self.ydata_rh)
+        if self.line_temp:
+            self.line_temp.set_data(self.xdata, self.ydata_temp)
+        if self.line_soil_temp:
+            self.line_soil_temp.set_data(self.xdata, self.ydata_soil_temp)
+        if self.line_rh:
+            self.line_rh.set_data(self.xdata, self.ydata_rh)
 
         return tuple(self.lines_moist) + (self.line_temp, self.line_soil_temp, self.line_rh)
 
@@ -305,7 +547,6 @@ class PlotWindow:
         if show:
             if self.window is None or not tk.Toplevel.winfo_exists(self.window):
                 self.window = tk.Toplevel(self.master)
-                self.window.title("Soil Moisture & Environmental Telemetry (Last 60s)")
                 scr_w = self.master.winfo_screenwidth()
                 scr_h = self.master.winfo_screenheight()
                 win_w = max(1100, int(scr_w * 0.94))
@@ -314,10 +555,9 @@ class PlotWindow:
                 pos_y = max(0, int((scr_h - win_h) / 2))
                 self.window.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
                 self.window.protocol("WM_DELETE_WINDOW", lambda: (self.toggle(False), on_close and on_close()))
-                FigureCanvasTkAgg(self.fig, master=self.window).get_tk_widget().pack(fill=tk.BOTH, expand=True)
-                self.ani = animation.FuncAnimation(
-                    self.fig, self._update, self._gen, interval=500, cache_frame_data=False
-                )
+                self.canvas_widget = FigureCanvasTkAgg(self.fig, master=self.window)
+                self.canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                self._render_current_mode()
             else:
                 self.window.deiconify()
                 self.window.lift()
@@ -325,7 +565,7 @@ class PlotWindow:
             if self.ani and self.ani.event_source:
                 self.ani.event_source.stop()
             self.window.destroy()
-            self.window, self.ani = None, None
+            self.window, self.ani, self.canvas_widget = None, None, None
 
 
 class MainWindow(tk.Tk):
@@ -338,9 +578,7 @@ class MainWindow(tk.Tk):
         self.scr_w = self.winfo_screenwidth()
         self.scr_h = self.winfo_screenheight() - 75
         self.geometry(f"{self.scr_w}x{self.scr_h}+0+0")
-        margin_w, btn_h = int(self.scr_w / 5), int(self.scr_h / 9.5)
-        gap_y = int(btn_h / 10)
-        y_pos = lambda slot: btn_h * slot + gap_y * (slot + 1)
+        margin_w = max(380, int(self.scr_w / 4.0))
 
         # Hardware & Telemetry State
         self.ser: serial.Serial | None = None
@@ -353,22 +591,45 @@ class MainWindow(tk.Tk):
         }
         self.current_pan, self.current_tilt = PAN_HOME, TILT_HOME
         self._repeat_job: str | None = None
+        self._data_logger_job: str | None = None
+        self._image_logger_job: str | None = None
+        self._scheduled_ticker_job: str | None = None
+        self._scheduled_monitor_job: str | None = None
+
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.plant_ai = PlantAIDetector()
         self.flag_capture = False
         self.photo_ref: ImageTk.PhotoImage | None = None
 
+        # State Models & Options
+        self.auto_var = tk.IntVar(value=1)
+        self.soil_water_setpoint = tk.DoubleVar(value=SOIL_WATER_SETPOINT)
+        self.plot_var = tk.IntVar(value=0)
+        self.plot_range_var = tk.StringVar(value="min")
+        self.data_record_var = tk.StringVar(value="10s")
+        self.image_record_var = tk.StringVar(value="1hr")
+        self.live_var = tk.IntVar(value=1)
+        self.plant_ai_var = tk.IntVar(value=0)
+        self.heatmap_var = tk.IntVar(value=0)
+
+        # Scheduled Watering State
+        self._last_scheduled_date: str | None = None
+        self._scheduled_watering_active: bool = False
+        self._scheduled_run_dir: Path | None = None
+        self._scheduled_start_time: float | None = None
+        self._scheduled_channels_active: list[int] = []
+
         # Build UI Layout
-        paned = tk.PanedWindow(self, orient=tk.HORIZONTAL)
+        paned = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=4)
         paned.pack(fill=tk.BOTH, expand=True)
         left_frame = tk.Frame(paned, relief=tk.SUNKEN)
-        right_frame = tk.Frame(paned, width=margin_w)
-        paned.add(left_frame, width=self.scr_w - margin_w, height=self.scr_h)
-        paned.add(right_frame)
+        right_frame = tk.Frame(paned, width=margin_w, bg="#f8f9fa")
+        paned.add(left_frame, stretch="always")
+        paned.add(right_frame, stretch="never", width=margin_w)
 
         self._build_bottom_bar(left_frame)
 
-        # Canvas with Scrollbars
+        # Canvas with Scrollbars (Left Camera Canvas)
         self.y_scrl = tk.Scrollbar(left_frame, orient=tk.VERTICAL)
         self.y_scrl.pack(fill=tk.Y, side=tk.RIGHT)
         self.x_scrl = tk.Scrollbar(left_frame, orient=tk.HORIZONTAL)
@@ -378,126 +639,193 @@ class MainWindow(tk.Tk):
         self.y_scrl.config(command=self.canvas.yview)
         self.x_scrl.config(command=self.canvas.xview)
 
-        # Sidebar Buttons (right_frame)
-        self.auto_var = tk.IntVar(value=1)
-        self.ckb_auto = tk.Checkbutton(
-            right_frame, text="AUTO", font=("arial", 32, "bold"), bg="white",
-            selectcolor="light green", bd=4, indicatoron=False, variable=self.auto_var,
-            command=self._on_auto_toggle
-        )
-        self.ckb_auto.place(x=0, y=y_pos(0), width=margin_w, height=btn_h)
+        # Scrollable Sidebar Container
+        self.sidebar_canvas = tk.Canvas(right_frame, bg="#f8f9fa", highlightthickness=0)
+        self.sidebar_scrl = tk.Scrollbar(right_frame, orient=tk.VERTICAL, command=self.sidebar_canvas.yview)
+        self.sidebar_content = tk.Frame(self.sidebar_canvas, bg="#f8f9fa")
 
-        self.plot_var = tk.IntVar(value=0)
-        self.ckb_plot = tk.Checkbutton(
-            right_frame, text="Plot", font=("arial", 32, "bold"), bg="white",
-            selectcolor="light grey", bd=4, indicatoron=False, variable=self.plot_var,
-            command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0))
-        )
-        self.ckb_plot.place(x=0, y=y_pos(1), width=margin_w, height=btn_h)
+        self.sidebar_win_id = self.sidebar_canvas.create_window((0, 0), window=self.sidebar_content, anchor="nw")
+        self.sidebar_canvas.config(yscrollcommand=self.sidebar_scrl.set)
 
-        self.water_frame = tk.Frame(right_frame, bg="light grey")
-        self.water_frame.place(x=0, y=y_pos(2), width=margin_w, height=btn_h)
-        self.water_vars: list[tk.IntVar] = []
-        self.water_btns: list[tk.Checkbutton] = []
-        self.rebuild_relays(4)
+        self.sidebar_scrl.pack(side=tk.RIGHT, fill=tk.Y)
+        self.sidebar_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.live_capture_frame = tk.Frame(right_frame, bg="white")
-        self.live_capture_frame.place(x=0, y=y_pos(3), width=margin_w, height=btn_h)
-        self.live_capture_frame.grid_columnconfigure(0, weight=1, uniform="row_btn")
-        self.live_capture_frame.grid_columnconfigure(1, weight=1, uniform="row_btn")
-        self.live_capture_frame.grid_rowconfigure(0, weight=1)
+        self.sidebar_content.bind("<Configure>", lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all")))
+        self.sidebar_canvas.bind("<Configure>", lambda e: self.sidebar_canvas.itemconfig(self.sidebar_win_id, width=e.width))
 
-        self.live_var = tk.IntVar(value=1)
-        self.ckb_live = tk.Checkbutton(
-            self.live_capture_frame, text="Live", font=("arial", 22, "bold"), bg="white",
-            selectcolor="yellow", bd=4, indicatoron=False, variable=self.live_var,
-            command=self._on_live_toggle
-        )
-        self.ckb_live.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+        def _on_mousewheel(event):
+            if event.num == 4:
+                self.sidebar_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.sidebar_canvas.yview_scroll(1, "units")
+            elif getattr(event, "delta", 0):
+                self.sidebar_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        self.btn_capture = tk.Button(
-            self.live_capture_frame, text="Capture", font=("arial", 22, "bold"), bg="white", fg="black",
-            activebackground="white", activeforeground="black", bd=4, command=self._on_capture
-        )
-        self.btn_capture.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
-        self._bind_capture_click_hold()
+        self.sidebar_canvas.bind_all("<Button-4>", _on_mousewheel)
+        self.sidebar_canvas.bind_all("<Button-5>", _on_mousewheel)
 
-        self.ai_heat_frame = tk.Frame(right_frame, bg="white")
-        self.ai_heat_frame.place(x=0, y=y_pos(4), width=margin_w, height=btn_h)
-        self.ai_heat_frame.grid_columnconfigure(0, weight=1, uniform="row_btn")
-        self.ai_heat_frame.grid_columnconfigure(1, weight=1, uniform="row_btn")
-        self.ai_heat_frame.grid_rowconfigure(0, weight=1)
+        # Build Sidebar Cards
+        self._build_sidebar_cards()
 
-        self.plant_ai_var = tk.IntVar(value=0)
-        self.ckb_plant_ai = tk.Checkbutton(
-            self.ai_heat_frame, text="Plant AI", font=("arial", 22, "bold"), bg="white",
-            selectcolor="#ffb703", bd=4, indicatoron=False, variable=self.plant_ai_var,
-            command=self._on_plant_ai_toggle
-        )
-        self.ckb_plant_ai.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
-
-        self.heatmap_var = tk.IntVar(value=0)
-        self.ckb_heatmap = tk.Checkbutton(
-            self.ai_heat_frame, text="Heatmap", font=("arial", 22, "bold"), bg="white",
-            selectcolor="#e63946", bd=4, indicatoron=False, variable=self.heatmap_var,
-            command=self._on_heatmap_toggle
-        )
-        self.ckb_heatmap.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
-
-        self._build_gimbal_panel(right_frame, margin_w, y_pos(5), self.scr_h - y_pos(5) - gap_y)
-
-        self.plotter = PlotWindow(self, lambda: self.telemetry)
+        self.plotter = PlotWindow(self, lambda: self.telemetry, range_var=self.plot_range_var)
         self._build_menu()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self._init_serial()
         self._camera_loop()
         self._auto_loop()
+        self._start_periodic_loggers()
+        self._start_scheduled_ticker()
 
-    def _build_bottom_bar(self, parent: tk.Frame) -> None:
-        bar = tk.Frame(parent, bg="#1a1d20", height=170, relief=tk.GROOVE, bd=3)
-        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=2, pady=2)
-        bar.pack_propagate(False)
-
-        row1 = tk.Frame(bar, bg="#1a1d20")
-        row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(8, 0))
-        tk.Label(row1, text="ENV:", font=("arial", 22, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 16))
-
-        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 22, "bold"), fg="#06d6a0", bg="#1a1d20")
-        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 22, "bold"), fg="#ffd166", bg="#1a1d20")
-        self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 22, "bold"), fg="#4cc9f0", bg="#1a1d20")
-        self.lbl_light = tk.Label(row1, text="Light: --", font=("arial", 22, "bold"), fg="#f72585", bg="#1a1d20")
-        
-        tpu_init_text = "TPU: Ready" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "TPU: Disconnected"
-        tpu_init_color = "#06d6a0" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "#e63946"
-        self.lbl_tpu_status = tk.Label(row1, text=tpu_init_text, font=("arial", 22, "bold"), fg=tpu_init_color, bg="#1a1d20")
-
-        for lbl in (self.lbl_soil_temp, self.lbl_air_temp, self.lbl_air_humi, self.lbl_light, self.lbl_tpu_status):
-            lbl.pack(side=tk.LEFT, padx=14)
-
-        row2 = tk.Frame(bar, bg="#1a1d20")
-        row2.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 8))
-        tk.Label(row2, text="MOIST:", font=("arial", 22, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 16))
-        self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=("arial", 22, "bold"), fg="#ffffff", bg="#1a1d20")
-        self.lbl_soil_moist.pack(side=tk.LEFT, padx=14)
-
-    def _build_gimbal_panel(self, parent: tk.Frame, width: int, y: int, height: int) -> None:
-        self.gimbal_frame = tk.Frame(
-            parent, bg="#f8f9fa", bd=3, relief=tk.GROOVE
+    def _build_sidebar_cards(self) -> None:
+        # Card 1: IRRIGATION
+        card_irrigation = tk.LabelFrame(
+            self.sidebar_content, text=" IRRIGATION ", font=("arial", 17, "bold"),
+            bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
         )
-        self.gimbal_frame.place(x=0, y=y, width=width, height=height)
+        card_irrigation.pack(fill=tk.X, padx=10, pady=(10, 8))
+        card_irrigation.grid_columnconfigure(0, weight=1)
+        card_irrigation.grid_columnconfigure(1, weight=1)
+
+        self.ckb_auto = tk.Checkbutton(
+            card_irrigation, text="AUTO", font=("arial", 23, "bold"), bg="white",
+            selectcolor="#2ecc71", bd=3, indicatoron=False, variable=self.auto_var,
+            command=self._on_auto_toggle
+        )
+        self.ckb_auto.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+
+        set_box = tk.Frame(card_irrigation, bg="white")
+        set_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
+        tk.Label(set_box, text="Set:", font=("arial", 20, "bold"), bg="white").pack(side=tk.LEFT, padx=(4, 2))
+        self.spn_setpoint = tk.Spinbox(
+            set_box, from_=10, to=90, increment=5, textvariable=self.soil_water_setpoint,
+            font=("arial", 20, "bold"), width=3, justify="center"
+        )
+        self.spn_setpoint.pack(side=tk.LEFT, padx=2)
+        tk.Label(set_box, text="%", font=("arial", 20, "bold"), bg="white").pack(side=tk.LEFT, padx=(2, 4))
+
+        self.water_frame = tk.Frame(card_irrigation, bg="white")
+        self.water_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(2, 8))
+        self.water_vars: list[tk.IntVar] = []
+        self.water_btns: list[tk.Checkbutton] = []
+        self.rebuild_relays(4)
+
+        # Card 2: PLOT (Untitled card with groove border)
+        card_plot = tk.Frame(self.sidebar_content, relief=tk.GROOVE, bd=2, bg="#ffffff")
+        card_plot.pack(fill=tk.X, padx=10, pady=8)
+        card_plot.grid_columnconfigure(0, weight=1)
+        card_plot.grid_columnconfigure(1, weight=1)
+
+        self.ckb_plot = tk.Checkbutton(
+            card_plot, text="PLOT", font=("arial", 23, "bold"), bg="white",
+            selectcolor="#b0bec5", bd=3, indicatoron=False, variable=self.plot_var,
+            command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0))
+        )
+        self.ckb_plot.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+
+        range_box = tk.Frame(card_plot, bg="white")
+        range_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
+        tk.Label(range_box, text="Range:", font=("arial", 18, "bold"), bg="white").pack(side=tk.LEFT, padx=(4, 2))
+        self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day", "week", "month")
+        self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=4)
+        try:
+            self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
+        except Exception:
+            pass
+        self.plot_range_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Card 3: RECORD
+        card_record = tk.LabelFrame(
+            self.sidebar_content, text=" RECORD ", font=("arial", 17, "bold"),
+            bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
+        )
+        card_record.pack(fill=tk.X, padx=10, pady=8)
+        card_record.grid_columnconfigure(0, weight=1)
+        card_record.grid_columnconfigure(1, weight=2)
+
+        tk.Label(card_record, text="Data  :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(10, 4), pady=5
+        )
+        self.data_record_dropdown = tk.OptionMenu(card_record, self.data_record_var, "10s", "1min", "1hr")
+        self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=4)
+        try:
+            self.data_record_dropdown["menu"].config(font=("arial", 15, "bold"))
+        except Exception:
+            pass
+        self.data_record_dropdown.grid(row=0, column=1, sticky="ew", padx=(4, 10), pady=5)
+
+        tk.Label(card_record, text="Image :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(10, 4), pady=5
+        )
+        self.image_record_dropdown = tk.OptionMenu(card_record, self.image_record_var, "sec", "min", "hr", "day")
+        self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=4)
+        try:
+            self.image_record_dropdown["menu"].config(font=("arial", 15, "bold"))
+        except Exception:
+            pass
+        self.image_record_dropdown.grid(row=1, column=1, sticky="ew", padx=(4, 10), pady=5)
+
+        # Card 4: IMAGE
+        card_image = tk.LabelFrame(
+            self.sidebar_content, text=" IMAGE ", font=("arial", 17, "bold"),
+            bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
+        )
+        card_image.pack(fill=tk.X, padx=10, pady=8)
+        card_image.grid_columnconfigure(0, weight=1)
+        card_image.grid_columnconfigure(1, weight=1)
+
+        self.ckb_live = tk.Checkbutton(
+            card_image, text="LIVE", font=("arial", 23, "bold"), bg="white",
+            selectcolor="#f1c40f", bd=3, indicatoron=False, variable=self.live_var,
+            command=self._on_live_toggle
+        )
+        self.ckb_live.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+
+        self.btn_capture = tk.Button(
+            card_image, text="Capture", font=("arial", 23, "bold"), bg="white", fg="black",
+            activebackground="white", activeforeground="black", bd=3, command=self._on_capture
+        )
+        self.btn_capture.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4, ipady=15)
+        self._bind_capture_click_hold()
+
+        # Card 5: PLANT
+        card_plant = tk.LabelFrame(
+            self.sidebar_content, text=" PLANT ", font=("arial", 17, "bold"),
+            bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
+        )
+        card_plant.pack(fill=tk.X, padx=10, pady=8)
+        card_plant.grid_columnconfigure(0, weight=1)
+        card_plant.grid_columnconfigure(1, weight=1)
+
+        self.ckb_plant_ai = tk.Checkbutton(
+            card_plant, text="AI", font=("arial", 23, "bold"), bg="white",
+            selectcolor="#ffb703", bd=3, indicatoron=False, variable=self.plant_ai_var,
+            command=self._on_plant_ai_toggle
+        )
+        self.ckb_plant_ai.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+
+        self.ckb_heatmap = tk.Checkbutton(
+            card_plant, text="Heatmap", font=("arial", 23, "bold"), bg="white",
+            selectcolor="#e63946", bd=3, indicatoron=False, variable=self.heatmap_var,
+            command=self._on_heatmap_toggle
+        )
+        self.ckb_heatmap.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4, ipady=15)
+
+        # Card 6: Camera Gimbal (Untitled card with groove border)
+        self.gimbal_frame = tk.Frame(self.sidebar_content, bg="#f8f9fa", bd=2, relief=tk.GROOVE)
+        self.gimbal_frame.pack(fill=tk.X, padx=10, pady=(10, 4))
         for i in range(3):
             self.gimbal_frame.grid_columnconfigure(i, weight=1, uniform="g_col")
             self.gimbal_frame.grid_rowconfigure(i, weight=1, uniform="g_row")
 
         self.lbl_gimbal = tk.Label(
-            self.gimbal_frame, text="GIMBAL", font=("arial", 18, "bold"),
+            self.gimbal_frame, text="Camera Gimbal", font=("arial", 15, "bold"),
             fg="#0d6efd", bg="#f8f9fa"
         )
-        self.lbl_gimbal.grid(row=0, column=0, sticky="nsew", padx=4, pady=2)
+        self.lbl_gimbal.grid(row=0, column=0, sticky="nsew", padx=3, pady=2)
 
         gcfg = {
-            "font": ("arial", 28, "bold"), "bd": 4, "bg": "#495057", "fg": "white",
+            "font": ("arial", 24, "bold"), "bd": 3, "bg": "#495057", "fg": "white",
             "activebackground": "#6c757d", "activeforeground": "white"
         }
         dpad = [
@@ -508,18 +836,213 @@ class MainWindow(tk.Tk):
         ]
         for attr, text, r, c, action in dpad:
             btn = tk.Button(self.gimbal_frame, text=text, **gcfg)
-            btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=2)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=2, ipady=11)
             btn.bind("<ButtonPress-1>", lambda e, a=action: self._start_repeat(a))
             btn.bind("<ButtonRelease-1>", self._stop_repeat)
             btn.bind("<Leave>", self._stop_repeat)
             setattr(self, attr, btn)
 
         self.btn_home = tk.Button(
-            self.gimbal_frame, text="Home", font=("arial", 18, "bold"), bd=4,
+            self.gimbal_frame, text="Home", font=("arial", 17, "bold"), bd=3,
             bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white",
             command=self.home_gimbal
         )
-        self.btn_home.grid(row=1, column=1, sticky="nsew", padx=4, pady=2)
+        self.btn_home.grid(row=1, column=1, sticky="nsew", padx=3, pady=2, ipady=11)
+        for i in range(3):
+            self.gimbal_frame.grid_columnconfigure(i, weight=1, uniform="g_col")
+            self.gimbal_frame.grid_rowconfigure(i, weight=1, uniform="g_row")
+
+        self.lbl_gimbal = tk.Label(
+            self.gimbal_frame, text="Camera Gimbal", font=("arial", 13, "bold"),
+            fg="#0d6efd", bg="#f8f9fa"
+        )
+        self.lbl_gimbal.grid(row=0, column=0, sticky="nsew", padx=3, pady=2)
+
+        gcfg = {
+            "font": ("arial", 22, "bold"), "bd": 3, "bg": "#495057", "fg": "white",
+            "activebackground": "#6c757d", "activeforeground": "white"
+        }
+        dpad = [
+            ("btn_tilt_up", "▲", 0, 1, lambda: self.nudge_tilt(-GIMBAL_STEP)),
+            ("btn_pan_left", "◀", 1, 0, lambda: self.nudge_pan(GIMBAL_STEP)),
+            ("btn_pan_right", "▶", 1, 2, lambda: self.nudge_pan(-GIMBAL_STEP)),
+            ("btn_tilt_down", "▼", 2, 1, lambda: self.nudge_tilt(GIMBAL_STEP)),
+        ]
+        for attr, text, r, c, action in dpad:
+            btn = tk.Button(self.gimbal_frame, text=text, **gcfg)
+            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=2, ipady=9)
+            btn.bind("<ButtonPress-1>", lambda e, a=action: self._start_repeat(a))
+            btn.bind("<ButtonRelease-1>", self._stop_repeat)
+            btn.bind("<Leave>", self._stop_repeat)
+            setattr(self, attr, btn)
+
+        self.btn_home = tk.Button(
+            self.gimbal_frame, text="Home", font=("arial", 15, "bold"), bd=3,
+            bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white",
+            command=self.home_gimbal
+        )
+        self.btn_home.grid(row=1, column=1, sticky="nsew", padx=3, pady=2, ipady=9)
+
+    def _build_bottom_bar(self, parent: tk.Frame) -> None:
+        bar = tk.Frame(parent, bg="#1a1d20", height=130, relief=tk.GROOVE, bd=3)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=2, pady=2)
+        bar.pack_propagate(False)
+
+        row1 = tk.Frame(bar, bg="#1a1d20")
+        row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(6, 0))
+        tk.Label(row1, text="ENV:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
+
+        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 16, "bold"), fg="#06d6a0", bg="#1a1d20")
+        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 16, "bold"), fg="#ffd166", bg="#1a1d20")
+        self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 16, "bold"), fg="#4cc9f0", bg="#1a1d20")
+        self.lbl_light = tk.Label(row1, text="Light: --", font=("arial", 16, "bold"), fg="#f72585", bg="#1a1d20")
+        
+        tpu_init_text = "TPU: Ready" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "TPU: Disconnected"
+        tpu_init_color = "#06d6a0" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "#e63946"
+        self.lbl_tpu_status = tk.Label(row1, text=tpu_init_text, font=("arial", 16, "bold"), fg=tpu_init_color, bg="#1a1d20")
+
+        for lbl in (self.lbl_soil_temp, self.lbl_air_temp, self.lbl_air_humi, self.lbl_light, self.lbl_tpu_status):
+            lbl.pack(side=tk.LEFT, padx=10)
+
+        row2 = tk.Frame(bar, bg="#1a1d20")
+        row2.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(2, 6))
+        tk.Label(row2, text="MOIST:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
+        self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=("arial", 16, "bold"), fg="#ffffff", bg="#1a1d20")
+        self.lbl_soil_moist.pack(side=tk.LEFT, padx=10)
+
+    def _start_periodic_loggers(self) -> None:
+        data_ms = parse_interval_to_ms(self.data_record_var.get(), default_ms=10_000)
+        self._data_logger_job = self.after(data_ms, self._periodic_data_logger)
+
+        img_ms = parse_interval_to_ms(self.image_record_var.get(), default_ms=3_600_000)
+        self._image_logger_job = self.after(img_ms, self._periodic_image_logger)
+
+    def _periodic_data_logger(self) -> None:
+        try:
+            moist = self.telemetry.get("moisture_pct", [])
+            self._log_telemetry_csv(self.telemetry, moist)
+        except Exception as e:
+            print(f"[Periodic Data Logger] Error: {e}")
+        finally:
+            interval_ms = parse_interval_to_ms(self.data_record_var.get(), default_ms=10_000)
+            self._data_logger_job = self.after(interval_ms, self._periodic_data_logger)
+
+    def _periodic_image_logger(self) -> None:
+        try:
+            if self.camera and self.camera.is_available:
+                clean_frame = self.camera.capture_array()
+                if clean_frame is not None:
+                    img_path = IMAGES_DIR / f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                    cv2.imwrite(str(img_path), clean_frame)
+                    print(f"[Periodic Image Logger] Saved clean frame to {img_path}")
+        except Exception as e:
+            print(f"[Periodic Image Logger] Error: {e}")
+        finally:
+            interval_ms = parse_interval_to_ms(self.image_record_var.get(), default_ms=3_600_000)
+            self._image_logger_job = self.after(interval_ms, self._periodic_image_logger)
+
+    def _start_scheduled_ticker(self) -> None:
+        self._scheduled_ticker_job = self.after(60_000, self._scheduled_check_ticker)
+
+    def _scheduled_check_ticker(self) -> None:
+        try:
+            now = datetime.now()
+            today_str = now.strftime("%Y-%m-%d")
+            if now.hour == 10 and now.minute == 0:
+                if self._last_scheduled_date != today_str:
+                    if self.auto_var.get():
+                        print(f"[Scheduled] 10:00 AM CST check triggered on {today_str}.")
+                        self._start_scheduled_watering(today_str)
+                    else:
+                        print(f"[Scheduled] 10:00 AM CST check skipped: Mode is MANUAL.")
+                        self._last_scheduled_date = today_str
+        except Exception as e:
+            print(f"[Scheduled Ticker] Error: {e}")
+        finally:
+            self._scheduled_ticker_job = self.after(60_000, self._scheduled_check_ticker)
+
+    def _start_scheduled_watering(self, date_str: str | None = None) -> None:
+        if self._scheduled_watering_active:
+            return
+        self._last_scheduled_date = date_str or datetime.now().strftime("%Y-%m-%d")
+        moistures = self.telemetry.get("moisture_pct", [])
+        setpoint = float(self.soil_water_setpoint.get())
+        active_channels = []
+        for ch in range(min(len(moistures), len(self.water_vars))):
+            m = moistures[ch]
+            if m is not None and m < setpoint:
+                active_channels.append(ch)
+
+        if not active_channels:
+            print(f"[Scheduled] All soil moisture channels >= setpoint ({setpoint}%). No watering needed.")
+            return
+
+        self._scheduled_watering_active = True
+        self._scheduled_start_time = time.time()
+        self._scheduled_channels_active = list(active_channels)
+
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._scheduled_run_dir = SCHEDULED_WATERING_DIR / run_stamp
+        self._scheduled_run_dir.mkdir(parents=True, exist_ok=True)
+
+        mask = ["1" if i in active_channels else "0" for i in range(len(self.water_vars))]
+        for i in range(len(self.water_vars)):
+            self.water_vars[i].set(1 if i in active_channels else 0)
+        self.send_bitmask("".join(mask))
+        print(f"[Scheduled] Watering started for channels {[c+1 for c in active_channels]} with target {SCHEDULED_TARGET_PCT}%. Dir: {self._scheduled_run_dir}")
+
+        self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
+
+    def _scheduled_watering_monitor(self) -> None:
+        if not self._scheduled_watering_active:
+            return
+
+        elapsed = time.time() - (self._scheduled_start_time or time.time())
+
+        # 1. Independent clean raw image capture
+        if self.camera and self.camera.is_available and self._scheduled_run_dir:
+            try:
+                clean_frame = self.camera.capture_array()
+                if clean_frame is not None:
+                    img_name = f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                    cv2.imwrite(str(self._scheduled_run_dir / img_name), clean_frame)
+            except Exception as e:
+                print(f"[Scheduled Monitor] Image capture error: {e}")
+
+        # 2. Check per-channel target cutoff (80%)
+        moistures = self.telemetry.get("moisture_pct", [])
+        still_active = []
+        for ch in self._scheduled_channels_active:
+            m = moistures[ch] if ch < len(moistures) else None
+            if m is not None and m >= SCHEDULED_TARGET_PCT:
+                print(f"[Scheduled] Channel S{ch+1} reached {m:.1f}% >= target ({SCHEDULED_TARGET_PCT}%). Turning OFF pump.")
+            else:
+                still_active.append(ch)
+
+        self._scheduled_channels_active = still_active
+        timed_out = elapsed >= SCHEDULED_MAX_WATERING_SEC
+
+        if timed_out and still_active:
+            print(f"[Scheduled WARNING] Safety timeout ({SCHEDULED_MAX_WATERING_SEC}s) reached! Stopping all pumps.")
+            summary_moist = [f"S{c+1}: {moistures[c]:.1f}%" if c < len(moistures) and moistures[c] is not None else f"S{c+1}: N/A" for c in still_active]
+            print(f"[Scheduled WARNING] Active channels remaining: {', '.join(summary_moist)}")
+
+        if not still_active or timed_out:
+            for i in range(len(self.water_vars)):
+                self.water_vars[i].set(0)
+            self.send_bitmask("0" * len(self.water_vars))
+            self._scheduled_watering_active = False
+            self._scheduled_channels_active = []
+            print(f"[Scheduled] Watering run completed in {elapsed:.1f}s. Timeout={timed_out}.")
+            return
+
+        # Update relays for remaining active channels
+        mask = ["1" if i in self._scheduled_channels_active else "0" for i in range(len(self.water_vars))]
+        for i in range(len(self.water_vars)):
+            self.water_vars[i].set(1 if i in self._scheduled_channels_active else 0)
+        self.send_bitmask("".join(mask))
+
+        self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
 
     def _bind_capture_click_hold(self) -> None:
         def on_press(event=None):
@@ -547,12 +1070,12 @@ class MainWindow(tk.Tk):
             var = tk.IntVar(value=1 if (i < len(relays_str) and relays_str[i] == '1') else 0)
             self.water_vars.append(var)
             btn = tk.Checkbutton(
-                self.water_frame, text=f"W{i+1}", font=("arial", 26, "bold"), bg="white",
+                self.water_frame, text=f"W{i+1}", font=("arial", 22, "bold"), bg="white",
                 fg="black", activeforeground="black", disabledforeground="black",
                 selectcolor="#1e88e5", indicatoron=False, variable=var, bd=3, state=state,
                 command=self._send_manual_relays
             )
-            btn.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1)
+            btn.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2, ipady=14, pady=2)
             self.water_btns.append(btn)
 
     def _on_auto_toggle(self) -> None:
@@ -637,8 +1160,6 @@ class MainWindow(tk.Tk):
                 pass
             self._repeat_job = None
 
-
-
     def nudge_pan(self, delta: int) -> None:
         new_pan = max(PAN_MIN, min(PAN_MAX, self.current_pan + delta))
         if new_pan == self.current_pan:
@@ -689,9 +1210,9 @@ class MainWindow(tk.Tk):
                 self.water_vars[i].set(expected)
 
     def _log_telemetry_csv(self, data: dict, moist: list[float | None]) -> None:
-        """Append a telemetry record to daily CSV file in DATA_DIR with a single header row."""
+        """Append a telemetry record to daily CSV file in TELEMETRY_DIR with a single header row."""
         try:
-            csv_path = DATA_DIR / f"telemetry_{datetime.now().strftime('%Y%m%d')}.csv"
+            csv_path = TELEMETRY_DIR / f"telemetry_{datetime.now().strftime('%Y%m%d')}.csv"
             write_header = not csv_path.exists() or csv_path.stat().st_size == 0
             with csv_path.open("a", encoding="utf-8") as f:
                 if write_header:
@@ -714,7 +1235,6 @@ class MainWindow(tk.Tk):
             pass
 
     def _serial_reader(self) -> None:
-        last_log = 0.0
         rx_buf = ""
         while not self.stop_threads.is_set():
             if self.ser and self.ser.is_open:
@@ -735,9 +1255,6 @@ class MainWindow(tk.Tk):
                                 if soil and len(soil) != len(self.water_vars):
                                     self.after(0, lambda n=len(soil): self.rebuild_relays(n))
                                 self.after(0, lambda d=data, m=moist: self._update_telemetry_ui(d, m))
-                                if time.time() - last_log >= 10.0:
-                                    self._log_telemetry_csv(data, moist)
-                                    last_log = time.time()
                     else:
                         time.sleep(0.05)
                 except Exception:
@@ -773,19 +1290,21 @@ class MainWindow(tk.Tk):
                         self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
                 self.display_image(display_frame)
                 if self.flag_capture:
-                    out = DATA_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:19]}.jpg"
+                    # Guarantees saving clean raw camera frame without overlays
+                    out = IMAGES_DIR / f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
                     cv2.imwrite(str(out), frame)
-                    print(f"[Capture] Saved snapshot to {out}")
+                    print(f"[Capture] Saved clean snapshot to {out}")
                     self.flag_capture = False
         self.after(30, self._camera_loop)
 
     def _auto_loop(self) -> None:
         if self.auto_var.get():
             moistures = self.telemetry.get("moisture_pct", [])
+            setpoint = float(self.soil_water_setpoint.get())
             mask, changed = [], False
             for i in range(min(len(moistures), len(self.water_vars))):
                 m = moistures[i]
-                des = 1 if (m is not None and m < SOIL_WATER_SETPOINT) else 0
+                des = 1 if (m is not None and m < setpoint) else 0
                 if self.water_vars[i].get() != des:
                     self.water_vars[i].set(des)
                     changed = True
@@ -840,6 +1359,21 @@ class MainWindow(tk.Tk):
             return
         self._is_closing = True
         self._stop_repeat()
+
+        # Cancel all pending after() jobs
+        for job in (
+            getattr(self, "_data_logger_job", None),
+            getattr(self, "_image_logger_job", None),
+            getattr(self, "_scheduled_ticker_job", None),
+            getattr(self, "_scheduled_monitor_job", None),
+            getattr(self, "_repeat_job", None),
+        ):
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+
         print("\nShutting down GUI and all pumps...")
         self.stop_threads.set()
         try:

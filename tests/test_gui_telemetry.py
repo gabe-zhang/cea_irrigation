@@ -214,7 +214,8 @@ def test_find_arduino_port_none():
 
 def test_log_telemetry_csv(tmp_path, monkeypatch):
     import gui.psc_irr_gui as psc_mod
-    monkeypatch.setattr(psc_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path / "telemetry")
+    (tmp_path / "telemetry").mkdir(parents=True, exist_ok=True)
 
     # Use MainWindow instance method or helper
     with patch("gui.psc_irr_gui.Camera"):
@@ -240,7 +241,7 @@ def test_log_telemetry_csv(tmp_path, monkeypatch):
                     app._log_telemetry_csv(data, moist)
 
                     today_str = datetime.now().strftime("%Y%m%d")
-                    csv_file = tmp_path / f"telemetry_{today_str}.csv"
+                    csv_file = tmp_path / "telemetry" / f"telemetry_{today_str}.csv"
                     assert csv_file.exists()
 
                     lines = csv_file.read_text(encoding="utf-8").strip().split("\n")

@@ -22,7 +22,7 @@ def test_analyze_crop_health_healthy():
     crop = np.zeros((100, 100, 3), dtype=np.uint8)
     crop[:, :] = (30, 200, 40)
 
-    status, h_pct, c_pct, n_pct, mean_hue, color = analyze_crop_health(crop)
+    status, h_pct, c_pct, n_pct, mean_hue, color, _, _ = analyze_crop_health(crop)
     assert status == "HEALTHY"
     assert h_pct >= 90.0
     assert c_pct < 10.0
@@ -36,7 +36,7 @@ def test_analyze_crop_health_chlorosis():
     crop = np.zeros((100, 100, 3), dtype=np.uint8)
     crop[:, :] = (30, 210, 220)
 
-    status, h_pct, c_pct, n_pct, mean_hue, color = analyze_crop_health(crop)
+    status, h_pct, c_pct, n_pct, mean_hue, color, _, _ = analyze_crop_health(crop)
     assert status == "YELLOWING WARNING"
     assert c_pct >= 50.0
     assert color == (0, 180, 255)
@@ -47,7 +47,7 @@ def test_analyze_crop_health_necrosis():
     crop = np.zeros((100, 100, 3), dtype=np.uint8)
     crop[:, :] = (30, 80, 150)
 
-    status, h_pct, c_pct, n_pct, mean_hue, color = analyze_crop_health(crop)
+    status, h_pct, c_pct, n_pct, mean_hue, color, _, _ = analyze_crop_health(crop)
     assert status == "BROWNING ALERT"
     assert (n_pct + c_pct) >= 45.0 or n_pct >= 20.0
     assert color == (0, 0, 230)
