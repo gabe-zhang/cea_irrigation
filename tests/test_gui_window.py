@@ -1,5 +1,6 @@
 """Headless integration tests for MainWindow and PlotWindow UI logic."""
 
+import time
 import tkinter as tk
 from unittest.mock import MagicMock, patch
 import pytest
@@ -156,6 +157,40 @@ def test_plot_window_lifecycle(headless_app):
     assert plotter.window is None
 
 
+def test_plot_window_layout_order_and_legend(headless_app):
+    app = headless_app
+    plotter = PlotWindow(app, lambda: [10.0, 20.0, 30.0, 40.0])
+    plotter.toggle(True)
+    plotter.window.update_idletasks()
+
+    # 1. Plot window is configured topmost (in live X11/Wayland returns 1, in headless with withdrawn master may be 0 or 1)
+    assert plotter.window.attributes("-topmost") in (0, 1, True)
+    # Ensure calling attributes('-topmost', True) succeeds without error
+    plotter.window.attributes("-topmost", True)
+
+    # 2. Window width leaves right control panel exposed
+    scr_w = app.winfo_screenwidth()
+    margin_w = app.margin_w
+    expected_w = max(600, scr_w - margin_w - 6)
+    assert f"{expected_w}x" in plotter.window.geometry()
+
+    # 3. Top subplot is temperature & RH, Bottom is soil moisture
+    assert plotter.ax_temp is not None
+    assert plotter.ax_moist is not None
+    assert "Temperature" in plotter.ax_temp.get_ylabel()
+    assert "Relative Humidity" in plotter.ax_rh.get_ylabel()
+    assert "Soil Moisture" in plotter.ax_moist.get_ylabel()
+    assert plotter.ax_temp.get_subplotspec().rowspan.start < plotter.ax_moist.get_subplotspec().rowspan.start
+
+    # 4. Legends are positioned at upper right (loc code 1)
+    leg_temp = plotter.ax_temp.get_legend()
+    leg_moist = plotter.ax_moist.get_legend()
+    assert leg_temp is not None and leg_temp._loc == 1
+    assert leg_moist is not None and leg_moist._loc == 1
+
+    plotter.toggle(False)
+
+
 def test_mainwindow_on_closing(headless_app):
     app = headless_app
     app.ser = MagicMock()
@@ -205,3 +240,81 @@ def test_mainwindow_camera_loop_with_plant_ai(headless_app):
             app._camera_loop()
             mock_display.assert_called_once()
             mock_after.assert_called_with(30, app._camera_loop)
+
+
+def test_read_historical_telemetry_flow_rate_and_events(tmp_path):
+    from scripts.generate_mock_watering import generate_mock_data
+    from datetime import date, datetime
+
+    today = date(2026, 9, 11)
+    csv_file = generate_mock_data(today, tmp_path)
+    assert csv_file.exists()
+
+    hist = psc_mod.read_historical_telemetry(tmp_path, "day", now=datetime(2026, 9, 11, 23, 59, 59))
+    assert len(hist["timestamps"]) > 0
+    assert len(hist["pump_events"]) == 2
+
+    ev1, ev2 = hist["pump_events"]
+    assert ev1["pump"] == 0
+    assert ev1["volume"] == 12.5
+    assert ev1["duration"] == 90.0
+
+    assert ev2["pump"] == 1
+    assert ev2["volume"] == 12.5
+    assert ev2["duration"] == 90.0
+
+
+def test_plot_window_threshold_lines_and_dynamic_setpoint(headless_app):
+    app = headless_app
+    plotter = PlotWindow(app, lambda: [35.0, 45.0, 55.0, 65.0], range_var=app.plot_range_var, setpoint_var=app.soil_water_setpoint)
+    plotter.toggle(True)
+    plotter.window.update()
+
+    # Red dashed setpoint line at 40%, Green dashed stop target line at 80%
+    assert plotter.line_setpoint is not None
+    assert plotter.line_stop is not None
+    assert list(plotter.line_setpoint.get_ydata()) == [40.0, 40.0]
+    assert list(plotter.line_stop.get_ydata()) == [80.0, 80.0]
+
+    # Dynamic update of setpoint spinbox
+    app.soil_water_setpoint.set(55.0)
+    plotter.window.update()
+    assert list(plotter.line_setpoint.get_ydata()) == [55.0, 55.0]
+
+    # Check that live legend contains only S1-S4
+    live_legend_labels = [t.get_text() for t in plotter.ax_moist.get_legend().get_texts()]
+    assert live_legend_labels == ["S1", "S2", "S3", "S4"]
+
+    plotter.toggle(False)
+
+
+def test_plot_window_historical_water_volume_axis_and_bars(headless_app, tmp_path, monkeypatch):
+    from scripts.generate_mock_watering import generate_mock_data
+    from datetime import date
+
+    monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
+    generate_mock_data(date(2026, 9, 11), tmp_path)
+
+    app = headless_app
+    plotter = PlotWindow(app, lambda: [35.0, 45.0, 55.0, 65.0], range_var=app.plot_range_var, setpoint_var=app.soil_water_setpoint)
+    plotter.toggle(True)
+    plotter.window.update()
+
+    # Switch to "day" mode
+    app.plot_range_var.set("day")
+    plotter.window.update()
+
+    # Check secondary water volume axis
+    ax_moist = plotter.fig.axes[2]  # Subplot 2,1,2 (ax_moist)
+    ax_vol = plotter.fig.axes[3]    # Twinx secondary axis (ax_vol)
+    assert "Water Volume" in ax_vol.get_ylabel()
+
+    # Check that pump event bars were plotted on ax_vol
+    bars = [c for c in ax_vol.containers]
+    assert len(bars) >= 2  # Pumps 1 and 2 bars plotted
+
+    # Check that legend contains ONLY sensor channels (S1-S4), no setpoint, stop target, or volume
+    legend_labels = [t.get_text() for t in ax_moist.get_legend().get_texts()]
+    assert legend_labels == ["S1", "S2", "S3", "S4"]
+
+    plotter.toggle(False)

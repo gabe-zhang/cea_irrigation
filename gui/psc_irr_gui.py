@@ -54,6 +54,8 @@ BAUDRATE = 9600
 SOIL_WATER_SETPOINT = 40.0  # Trigger pump below this moisture % in AUTO mode
 SCHEDULED_TARGET_PCT = 80.0  # Scheduled irrigation shuts off when channel reaches 80%
 SCHEDULED_MAX_WATERING_SEC = 180  # 3-minute hard safety timeout
+PUMP_FLOW_RATE_LPH = 500.0  # Pump flow rate: 500 L/Hour
+PUMP_FLOW_RATE_LPS = PUMP_FLOW_RATE_LPH / 3600.0  # ~0.13889 Liters/Second
 DRY_BASELINES = [432.0, 408.0, 427.0, 424.0]
 WET_BASELINES = [136.0, 92.0, 159.0, 160.0]
 
@@ -217,7 +219,7 @@ def read_historical_telemetry(telemetry_dir: Path, range_mode: str, now: datetim
     """Read telemetry CSV records from telemetry_dir matching range_mode ('day', 'week', 'month').
     
     Returns:
-        dict with keys: 'timestamps', 'moisture', 'soil_temp', 'air_temp', 'humidity'
+        dict with keys: 'timestamps', 'moisture', 'soil_temp', 'air_temp', 'humidity', 'pump_volumes', 'pump_events'
     """
     if now is None:
         now = datetime.now()
@@ -237,6 +239,8 @@ def read_historical_telemetry(telemetry_dir: Path, range_mode: str, now: datetim
     soil_temps: list[float | None] = []
     air_temps: list[float | None] = []
     humidities: list[float | None] = []
+    pump_volumes: list[list[float]] = [[], [], [], []]
+    pump_events: list[dict] = []
 
     if not telemetry_dir.exists():
         return {
@@ -245,10 +249,12 @@ def read_historical_telemetry(telemetry_dir: Path, range_mode: str, now: datetim
             "soil_temp": soil_temps,
             "air_temp": air_temps,
             "humidity": humidities,
+            "pump_volumes": pump_volumes,
+            "pump_events": pump_events,
         }
 
     csv_files = sorted(telemetry_dir.glob("telemetry_*.csv"))
-    rows: list[tuple[datetime, list[float | None], float | None, float | None, float | None]] = []
+    rows: list[tuple[datetime, list[float | None], float | None, float | None, float | None, str]] = []
 
     for fpath in csv_files:
         try:
@@ -278,12 +284,15 @@ def read_historical_telemetry(telemetry_dir: Path, range_mode: str, now: datetim
                     st = _safe_float(row[9])
                     at = _safe_float(row[10])
                     rh = _safe_float(row[11])
-                    rows.append((dt, [m1, m2, m3, m4], st, at, rh))
+                    relays_str = row[13].strip() if len(row) > 13 else "0000"
+                    rows.append((dt, [m1, m2, m3, m4], st, at, rh, relays_str))
         except Exception as e:
             print(f"[Telemetry Reader] Error reading {fpath.name}: {e}")
 
     rows.sort(key=lambda x: x[0])
-    for dt, m_list, st, at, rh in rows:
+    active_runs: dict[int, dict] = {}
+
+    for idx, (dt, m_list, st, at, rh, r_str) in enumerate(rows):
         timestamps.append(dt)
         for i in range(4):
             moistures[i].append(m_list[i])
@@ -291,22 +300,72 @@ def read_historical_telemetry(telemetry_dir: Path, range_mode: str, now: datetim
         air_temps.append(at)
         humidities.append(rh)
 
+        if idx > 0:
+            dt_step = (dt - rows[idx - 1][0]).total_seconds()
+            if dt_step < 0 or dt_step > 300.0:
+                dt_step = 0.0
+        else:
+            dt_step = 0.0
+
+        for i in range(4):
+            is_on = (i < len(r_str) and r_str[i] == "1")
+            step_vol = (dt_step * PUMP_FLOW_RATE_LPS) if is_on else 0.0
+            pump_volumes[i].append(round(step_vol, 3))
+
+            if is_on:
+                if i not in active_runs:
+                    active_runs[i] = {"start": dt, "last": dt}
+                else:
+                    active_runs[i]["last"] = dt
+            else:
+                if i in active_runs:
+                    run = active_runs.pop(i)
+                    dur = max(1.0, min((dt - run["start"]).total_seconds(), float(SCHEDULED_MAX_WATERING_SEC)))
+                    vol = round(dur * PUMP_FLOW_RATE_LPS, 2)
+                    pump_events.append({
+                        "timestamp": run["start"],
+                        "pump": i,
+                        "volume": vol,
+                        "duration": dur,
+                    })
+
+    for i, run in list(active_runs.items()):
+        dur = max(1.0, min((run["last"] - run["start"]).total_seconds(), float(SCHEDULED_MAX_WATERING_SEC)))
+        if dur <= 1.0 and rows:
+            dur = 10.0
+        vol = round(dur * PUMP_FLOW_RATE_LPS, 2)
+        pump_events.append({
+            "timestamp": run["start"],
+            "pump": i,
+            "volume": vol,
+            "duration": dur,
+        })
+
     return {
         "timestamps": timestamps,
         "moisture": moistures,
         "soil_temp": soil_temps,
         "air_temp": air_temps,
         "humidity": humidities,
+        "pump_volumes": pump_volumes,
+        "pump_events": pump_events,
     }
 
 
 class PlotWindow:
     """Dynamic Matplotlib window displaying 60s live or historical telemetry."""
 
-    def __init__(self, master: tk.Tk, get_telemetry_fn, range_var: tk.StringVar | None = None) -> None:
+    def __init__(
+        self,
+        master: tk.Tk,
+        get_telemetry_fn,
+        range_var: tk.StringVar | None = None,
+        setpoint_var: tk.DoubleVar | None = None,
+    ) -> None:
         self.master = master
         self.get_telemetry = get_telemetry_fn
         self.range_var = range_var or tk.StringVar(value="min")
+        self.setpoint_var = setpoint_var or getattr(master, "soil_water_setpoint", None)
         self.window: tk.Toplevel | None = None
         self.canvas_widget: FigureCanvasTkAgg | None = None
         self.ani: animation.FuncAnimation | None = None
@@ -320,37 +379,44 @@ class PlotWindow:
 
         self.fig = Figure(figsize=(15.0, 10.5), dpi=100)
         self.lines_moist = []
+        self.line_setpoint = None
+        self.line_stop = None
         self.line_temp = None
         self.line_soil_temp = None
         self.line_rh = None
         self.ax_moist = None
+        self.ax_vol = None
         self.ax_temp = None
         self.ax_rh = None
 
         self._init_live_figure()
         self._trace_id = self.range_var.trace_add("write", self._on_range_changed)
+        self._sp_trace_id = None
+        if self.setpoint_var:
+            self._sp_trace_id = self.setpoint_var.trace_add("write", self._on_setpoint_changed)
+
+    def _on_setpoint_changed(self, *args) -> None:
+        if self.window and tk.Toplevel.winfo_exists(self.window):
+            mode = self.range_var.get().strip().lower()
+            if mode == "min":
+                try:
+                    sp = float(self.setpoint_var.get())
+                    if hasattr(self, "line_setpoint") and self.line_setpoint:
+                        self.line_setpoint.set_ydata([sp, sp])
+                    if self.canvas_widget:
+                        self.canvas_widget.draw_idle()
+                except Exception:
+                    pass
+            else:
+                self._render_current_mode()
+            self.window.lift()
 
     def _init_live_figure(self) -> None:
         self.fig.clf()
-        self.fig.suptitle("Soil Moisture & Environmental Telemetry (Last 60s)", fontsize=24, fontweight="bold")
+        self.fig.suptitle("Environmental Telemetry & Soil Moisture (Last 60s)", fontsize=24, fontweight="bold")
 
-        # Top Plot: Soil Moisture (0-100%)
-        self.ax_moist = self.fig.add_subplot(2, 1, 1)
-        self.lines_moist = []
-        for i, c in enumerate(self.colors):
-            (line,) = self.ax_moist.plot([], [], color=c, linewidth=3.6, label=f"S{i+1}")
-            self.lines_moist.append(line)
-
-        self.ax_moist.set_ylim(0, 100)
-        self.ax_moist.set_xlim(0, 60)
-        self.ax_moist.set_xticks([0, 10, 20, 30, 40, 50, 60])
-        self.ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
-        self.ax_moist.tick_params(axis="both", labelsize=18)
-        self.ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
-        self.ax_moist.legend(loc="upper left", fontsize=18, ncol=4, framealpha=0.92)
-
-        # Bottom Plot: Temperatures (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
-        self.ax_temp = self.fig.add_subplot(2, 1, 2, sharex=self.ax_moist)
+        # Top Plot: Temperatures (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
+        self.ax_temp = self.fig.add_subplot(2, 1, 1)
         self.ax_rh = self.ax_temp.twinx()
 
         (self.line_temp,) = self.ax_temp.plot([], [], color="#d62728", linewidth=3.6, label="Air Temp (°C)")
@@ -362,7 +428,6 @@ class PlotWindow:
         self.ax_temp.set_ylim(0, 50)
         self.ax_temp.set_xlim(0, 60)
         self.ax_temp.set_xticks([0, 10, 20, 30, 40, 50, 60])
-        self.ax_temp.set_xlabel("Time (s)", fontsize=20, fontweight="bold")
         self.ax_temp.set_ylabel("Temperature (°C)", fontsize=20, fontweight="bold", color="#d62728")
         self.ax_temp.tick_params(axis="x", labelsize=18)
         self.ax_temp.tick_params(axis="y", labelcolor="#d62728", labelsize=18)
@@ -375,11 +440,35 @@ class PlotWindow:
         self.ax_temp.legend(
             [self.line_temp, self.line_soil_temp, self.line_rh],
             ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"],
-            loc="upper left",
+            loc="upper right",
             fontsize=18,
             ncol=3,
             framealpha=0.92,
         )
+
+        # Bottom Plot: Soil Moisture (0-100%)
+        self.ax_moist = self.fig.add_subplot(2, 1, 2, sharex=self.ax_temp)
+        self.lines_moist = []
+        for i, c in enumerate(self.colors):
+            (line,) = self.ax_moist.plot([], [], color=c, linewidth=3.6, label=f"S{i+1}")
+            self.lines_moist.append(line)
+
+        sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
+        self.line_setpoint = self.ax_moist.axhline(
+            sp, color="#e63946", linestyle="--", linewidth=2.5
+        )
+        self.line_stop = self.ax_moist.axhline(
+            SCHEDULED_TARGET_PCT, color="#2ecc71", linestyle="--", linewidth=2.5
+        )
+
+        self.ax_moist.set_ylim(0, 100)
+        self.ax_moist.set_xlim(0, 60)
+        self.ax_moist.set_xticks([0, 10, 20, 30, 40, 50, 60])
+        self.ax_moist.set_xlabel("Time (s)", fontsize=20, fontweight="bold")
+        self.ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
+        self.ax_moist.tick_params(axis="both", labelsize=18)
+        self.ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
+        self.ax_moist.legend(loc="upper right", fontsize=18, ncol=4, framealpha=0.92)
 
         self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
         self.fig.subplots_adjust(hspace=0.35)
@@ -396,23 +485,14 @@ class PlotWindow:
                 ha="center", va="center", fontsize=20, color="#6c757d", fontweight="bold"
             )
             ax.axis("off")
-            self.fig.suptitle(f"Soil Moisture & Environmental Telemetry ({mode.capitalize()})", fontsize=24, fontweight="bold")
+            self.fig.suptitle(f"Environmental Telemetry & Soil Moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
             self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
             return
 
-        self.fig.suptitle(f"Soil Moisture & Environmental Telemetry ({mode.capitalize()})", fontsize=24, fontweight="bold")
-        ax_moist = self.fig.add_subplot(2, 1, 1)
-        for i, c in enumerate(self.colors):
-            y_vals = [v if v is not None else np.nan for v in hist["moisture"][i]]
-            ax_moist.plot(ts, y_vals, color=c, linewidth=2.8, label=f"S{i+1}")
+        self.fig.suptitle(f"Environmental Telemetry & Soil Moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
 
-        ax_moist.set_ylim(0, 100)
-        ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
-        ax_moist.tick_params(axis="both", labelsize=16)
-        ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
-        ax_moist.legend(loc="upper left", fontsize=16, ncol=4, framealpha=0.92)
-
-        ax_temp = self.fig.add_subplot(2, 1, 2, sharex=ax_moist)
+        # Top Plot: Temperatures (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
+        ax_temp = self.fig.add_subplot(2, 1, 1)
         ax_rh = ax_temp.twinx()
 
         y_temp = [v if v is not None else np.nan for v in hist["air_temp"]]
@@ -433,15 +513,73 @@ class PlotWindow:
         ax_rh.set_ylabel("Relative Humidity (%)", fontsize=20, fontweight="bold", color="#00838f")
         ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=16)
 
-        ax_temp.legend([l_t, l_s, l_rh], ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"], loc="upper left", fontsize=16, ncol=3, framealpha=0.92)
+        ax_temp.legend([l_t, l_s, l_rh], ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"], loc="upper right", fontsize=16, ncol=3, framealpha=0.92)
+
+        # Bottom Plot: Soil Moisture (0-100%) & Secondary Water Volume Axis (L)
+        ax_moist = self.fig.add_subplot(2, 1, 2, sharex=ax_temp)
+        ax_vol = ax_moist.twinx()
+
+        for i, c in enumerate(self.colors):
+            y_vals = [v if v is not None else np.nan for v in hist["moisture"][i]]
+            ax_moist.plot(ts, y_vals, color=c, linewidth=2.8, label=f"S{i+1}")
+
+        sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
+        ax_moist.axhline(sp, color="#e63946", linestyle="--", linewidth=2.2)
+        ax_moist.axhline(SCHEDULED_TARGET_PCT, color="#2ecc71", linestyle="--", linewidth=2.2)
+
+        ax_moist.set_ylim(0, 100)
+        ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
+        ax_moist.tick_params(axis="both", labelsize=16)
+        ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
+
+        # Plot water volume bars on ax_vol for any pump events
+        pump_events = hist.get("pump_events", [])
+        if mode == "day":
+            base_w = timedelta(minutes=10)
+            offsets = [timedelta(minutes=m) for m in (-15, -5, 5, 15)]
+        elif mode == "week":
+            base_w = timedelta(hours=1)
+            offsets = [timedelta(hours=h) for h in (-1.5, -0.5, 0.5, 1.5)]
+        else:  # month
+            base_w = timedelta(hours=4)
+            offsets = [timedelta(hours=h) for h in (-6, -2, 2, 6)]
+
+        max_vol = 0.0
+        for ev in pump_events:
+            p_idx = ev["pump"]
+            vol = ev["volume"]
+            ev_ts = ev["timestamp"]
+            if vol > 0:
+                max_vol = max(max_vol, vol)
+                ax_vol.bar(
+                    ev_ts + offsets[p_idx],
+                    vol,
+                    width=base_w,
+                    color=self.colors[p_idx],
+                    alpha=0.45,
+                    edgecolor=self.colors[p_idx],
+                    linewidth=1.5,
+                )
+
+        ax_vol.set_ylabel("Water Volume (L)", fontsize=20, fontweight="bold", color="#0288d1")
+        ax_vol.tick_params(axis="y", labelcolor="#0288d1", labelsize=16)
+        ax_vol.grid(False)
+        ax_vol.set_ylim(0, max(max_vol * 1.35, 15.0))
 
         if mode == "day":
-            ax_temp.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
         elif mode == "week":
-            ax_temp.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d\n%H:%M"))
+            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d\n%H:%M"))
         else:  # month
-            ax_temp.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
-        ax_temp.set_xlabel("Date / Time", fontsize=18, fontweight="bold")
+            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+        ax_moist.set_xlabel("Date / Time", fontsize=18, fontweight="bold")
+
+        ax_moist.legend(
+            loc="upper right",
+            fontsize=16,
+            ncol=4,
+            framealpha=0.92,
+        )
 
         self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
         self.fig.subplots_adjust(hspace=0.35)
@@ -465,7 +603,7 @@ class PlotWindow:
                 self.fig, self._update, self._gen, interval=500, cache_frame_data=False
             )
             if self.window:
-                self.window.title("Soil Moisture & Environmental Telemetry (Last 60s)")
+                self.window.title("Environmental Telemetry & Soil Moisture (Last 60s)")
         else:
             if self.ani and self.ani.event_source:
                 self.ani.event_source.stop()
@@ -480,6 +618,7 @@ class PlotWindow:
     def _on_range_changed(self, *args) -> None:
         if self.window and tk.Toplevel.winfo_exists(self.window):
             self._render_current_mode()
+            self.window.lift()
 
     def _update(self, data: tuple):
         if len(data) >= 5:
@@ -548,18 +687,34 @@ class PlotWindow:
             if self.window is None or not tk.Toplevel.winfo_exists(self.window):
                 self.window = tk.Toplevel(self.master)
                 scr_w = self.master.winfo_screenwidth()
-                scr_h = self.master.winfo_screenheight()
-                win_w = max(1100, int(scr_w * 0.94))
-                win_h = max(800, int(scr_h * 0.93))
-                pos_x = max(0, int((scr_w - win_w) / 2))
-                pos_y = max(0, int((scr_h - win_h) / 2))
+                scr_h = getattr(self.master, "scr_h", self.master.winfo_screenheight() - 75)
+                margin_w = getattr(self.master, "margin_w", max(380, int(scr_w / 4.0)))
+
+                # Expose right control panel (width margin_w) and keep plot window docked to the left
+                win_w = max(600, scr_w - margin_w - 6)
+                win_h = max(600, scr_h)
+                pos_x = 0
+                pos_y = 0
+
                 self.window.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+                self.window.attributes("-topmost", True)
+                if self.master and getattr(self.master, "winfo_viewable", lambda: False)():
+                    try:
+                        self.window.transient(self.master)
+                    except Exception:
+                        pass
                 self.window.protocol("WM_DELETE_WINDOW", lambda: (self.toggle(False), on_close and on_close()))
                 self.canvas_widget = FigureCanvasTkAgg(self.fig, master=self.window)
                 self.canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)
                 self._render_current_mode()
             else:
                 self.window.deiconify()
+                self.window.attributes("-topmost", True)
+                if self.master and getattr(self.master, "winfo_viewable", lambda: False)():
+                    try:
+                        self.window.transient(self.master)
+                    except Exception:
+                        pass
                 self.window.lift()
         elif self.window and tk.Toplevel.winfo_exists(self.window):
             if self.ani and self.ani.event_source:
@@ -578,7 +733,8 @@ class MainWindow(tk.Tk):
         self.scr_w = self.winfo_screenwidth()
         self.scr_h = self.winfo_screenheight() - 75
         self.geometry(f"{self.scr_w}x{self.scr_h}+0+0")
-        margin_w = max(380, int(self.scr_w / 4.0))
+        self.margin_w = max(380, int(self.scr_w / 4.0))
+        margin_w = self.margin_w
 
         # Hardware & Telemetry State
         self.ser: serial.Serial | None = None
@@ -667,7 +823,7 @@ class MainWindow(tk.Tk):
         # Build Sidebar Cards
         self._build_sidebar_cards()
 
-        self.plotter = PlotWindow(self, lambda: self.telemetry, range_var=self.plot_range_var)
+        self.plotter = PlotWindow(self, lambda: self.telemetry, range_var=self.plot_range_var, setpoint_var=self.soil_water_setpoint)
         self._build_menu()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
