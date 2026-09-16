@@ -17,3 +17,6 @@ img_mask.jpg
 # Development files
 TODOs.md
 assets/
+runs/
+tests/yolo_runs/
+scripts/**slide**
