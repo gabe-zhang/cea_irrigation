@@ -122,12 +122,12 @@ class PlantAIDetector:
         self,
         model_path: Path | str | None = None,
         labels_path: Path | str | None = None,
-        confidence_threshold: float = 0.45,
+        confidence_threshold: float = 0.08,
         target_classes: list[int] | None = None,
     ) -> None:
         self.confidence_threshold = confidence_threshold
         # COCO class 63 = potted plant (0-indexed in coco_labels.txt is line 64 / index 63 or 58)
-        self.target_classes = target_classes or [58, 63, 64]
+        self.target_classes = target_classes or [0, 58, 63, 64]
         self.is_available = False
         self.labels: dict[int, str] = {}
         self.interpreter = None
@@ -136,7 +136,16 @@ class PlantAIDetector:
         self.last_latency_ms = 0.0
 
         base_dir = Path(__file__).resolve().parent.parent
-        self.model_path = Path(model_path) if model_path else base_dir / "models" / "ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite"
+        yolo_model = base_dir / "models" / "yolo26n_e100.tflite"
+        ssd_model = base_dir / "models" / "ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite"
+
+        if model_path:
+            self.model_path = Path(model_path)
+        elif yolo_model.is_file():
+            self.model_path = yolo_model
+        else:
+            self.model_path = ssd_model
+
         self.labels_path = Path(labels_path) if labels_path else base_dir / "models" / "coco_labels.txt"
 
         self._load_labels()
@@ -179,7 +188,7 @@ class PlantAIDetector:
             return False
 
     def detect_and_analyze(self, frame: np.ndarray, min_score: float | None = None) -> tuple[list[PlantHealthResult], float]:
-        """Execute Stage 1 localization and Stage 2 canopy stress profiling.
+        """Execute Stage 1 Edge TPU localization (YOLO or SSD) and Stage 2 canopy stress profiling.
         
         Returns:
             tuple of (results_list, latency_ms)
@@ -196,71 +205,121 @@ class PlantAIDetector:
             try:
                 start_time = time.perf_counter()
                 
-                # Model input shape is typically (1, 300, 300, 3) uint8 RGB
-                in_shape = self.input_details[0]["shape"]
-                target_h, target_w = in_shape[1], in_shape[2]
+                in_det = self.input_details[0]
+                target_h, target_w = in_det["shape"][1], in_det["shape"][2]
 
                 # Convert BGR -> RGB and resize
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                input_tensor = cv2.resize(rgb, (target_w, target_h))
+                resized = cv2.resize(rgb, (target_w, target_h))
+
+                # Handle INT8 / UINT8 / FLOAT32 input quantization
+                if in_det["dtype"] == np.int8:
+                    scale, zp = in_det["quantization"]
+                    input_tensor = ((resized / 255.0) / scale + zp).astype(np.int8)
+                elif in_det["dtype"] == np.uint8:
+                    scale, zp = in_det["quantization"]
+                    if scale > 0:
+                        input_tensor = ((resized / 255.0) / scale + zp).astype(np.uint8)
+                    else:
+                        input_tensor = resized.astype(np.uint8)
+                else:
+                    input_tensor = (resized / 255.0).astype(np.float32)
+
                 input_tensor = np.expand_dims(input_tensor, axis=0)
-
-                self.interpreter.set_tensor(self.input_details[0]["index"], input_tensor)
+                self.interpreter.set_tensor(in_det["index"], input_tensor)
                 self.interpreter.invoke()
-
-                # TFLite postprocessed SSD outputs:
-                # Output 0: boxes [1, N, 4] -> [ymin, xmin, ymax, xmax] (normalized 0..1)
-                # Output 1: classes [1, N]
-                # Output 2: scores [1, N]
-                # Output 3: count [1]
-                boxes = self.interpreter.get_tensor(self.output_details[0]["index"])[0]
-                classes = self.interpreter.get_tensor(self.output_details[1]["index"])[0]
-                scores = self.interpreter.get_tensor(self.output_details[2]["index"])[0]
-                count = int(self.interpreter.get_tensor(self.output_details[3]["index"])[0])
-
                 latency_ms = (time.perf_counter() - start_time) * 1000.0
                 self.last_latency_ms = latency_ms
 
-                for i in range(min(count, len(scores))):
-                    score = float(scores[i])
-                    if score < threshold:
-                        continue
+                candidate_boxes: list[tuple[int, int, int, int]] = []
+                candidate_scores: list[float] = []
 
-                    class_id = int(classes[i])
-                    label_name = self.labels.get(class_id, f"class_{class_id}")
+                # Branch A: YOLO architecture (single output tensor [1, 5, 8400] or [1, num_anchors, channels])
+                if len(self.output_details) == 1:
+                    out_det = self.output_details[0]
+                    raw_out = self.interpreter.get_tensor(out_det["index"])[0]
+                    if out_det["quantization"][0] > 0:
+                        out_scale, out_zp = out_det["quantization"]
+                        out_float = (raw_out.astype(np.float32) - out_zp) * out_scale
+                    else:
+                        out_float = raw_out.astype(np.float32)
 
-                    is_plant = (
-                        class_id in self.target_classes
-                        or "plant" in label_name.lower()
-                        or "flower" in label_name.lower()
-                        or "pot" in label_name.lower()
-                        or "vase" in label_name.lower()
-                    )
+                    if out_float.shape[0] < out_float.shape[1]:
+                        out_float = out_float.T  # Transpose [5, 8400] -> [8400, 5]
 
-                    # Strictly filter for plant-related objects
-                    if not is_plant:
-                        continue  # Discard non-plant objects (desks, wires, chairs, keyboards, etc.)
+                    cx = out_float[:, 0]
+                    cy = out_float[:, 1]
+                    bw_norm = out_float[:, 2]
+                    bh_norm = out_float[:, 3]
+                    scores = out_float[:, 4] if out_float.shape[1] == 5 else np.max(out_float[:, 4:], axis=1)
 
-                    ymin, xmin, ymax, xmax = boxes[i]
-                    bx = max(0, int(xmin * w))
-                    by = max(0, int(ymin * h))
-                    bw = min(w - bx, int((xmax - xmin) * w))
-                    bh = min(h - by, int((ymax - ymin) * h))
+                    mask = scores >= threshold
+                    cx, cy, bw_norm, bh_norm, scores = cx[mask], cy[mask], bw_norm[mask], bh_norm[mask], scores[mask]
 
-                    if bw < 15 or bh < 15:
-                        continue
+                    boxes_for_nms = []
+                    for c_x, c_y, b_w, b_h in zip(cx, cy, bw_norm, bh_norm):
+                        bx = int((c_x - b_w / 2.0) * w)
+                        by = int((c_y - b_h / 2.0) * h)
+                        box_w = int(b_w * w)
+                        box_h = int(b_h * h)
+                        boxes_for_nms.append([bx, by, box_w, box_h])
 
-                    crop = frame[by : by + bh, bx : bx + bw]
+                    indices = cv2.dnn.NMSBoxes(boxes_for_nms, scores.tolist(), threshold, 0.45)
+                    if len(indices) > 0:
+                        for idx in indices.flatten():
+                            candidate_boxes.append(tuple(boxes_for_nms[idx]))
+                            candidate_scores.append(float(scores[idx]))
+
+                # Branch B: SSD MobileNet postprocessed outputs (boxes, classes, scores, count)
+                else:
+                    boxes = self.interpreter.get_tensor(self.output_details[0]["index"])[0]
+                    classes = self.interpreter.get_tensor(self.output_details[1]["index"])[0]
+                    scores = self.interpreter.get_tensor(self.output_details[2]["index"])[0]
+                    count = int(self.interpreter.get_tensor(self.output_details[3]["index"])[0])
+
+                    for i in range(min(count, len(scores))):
+                        score = float(scores[i])
+                        if score < threshold:
+                            continue
+
+                        class_id = int(classes[i])
+                        label_name = self.labels.get(class_id, f"class_{class_id}")
+                        is_plant = (
+                            class_id in self.target_classes
+                            or "plant" in label_name.lower()
+                            or "flower" in label_name.lower()
+                            or "pot" in label_name.lower()
+                            or "vase" in label_name.lower()
+                        )
+                        if not is_plant:
+                            continue
+
+                        ymin, xmin, ymax, xmax = boxes[i]
+                        bx = max(0, int(xmin * w))
+                        by = max(0, int(ymin * h))
+                        box_w = min(w - bx, int((xmax - xmin) * w))
+                        box_h = min(h - by, int((ymax - ymin) * h))
+                        candidate_boxes.append((bx, by, box_w, box_h))
+                        candidate_scores.append(score)
+
+                # Stage 2: Canopy stress profiling on all candidate plant regions
+                for (bx, by, bw, bh), score in zip(candidate_boxes, candidate_scores):
+                    bx_c = max(0, min(w - 1, bx))
+                    by_c = max(0, min(h - 1, by))
+                    bw_c = max(5, min(w - bx_c, bw))
+                    bh_c = max(5, min(h - by_c, bh))
+
+                    crop = frame[by_c : by_c + bh_c, bx_c : bx_c + bw_c]
                     status, healthy_pct, chlorosis_pct, necrosis_pct, mean_hue, color_bgr, canopy_coverage, uniformity_score = analyze_crop_health(crop)
 
-                    # If no vegetation is found inside the detected object box, discard as false positive
+                    # Discard regions with zero foliage pixels
                     if status == "NO VEGETATION":
                         continue
 
                     results.append(
                         PlantHealthResult(
-                            bbox=(bx, by, bw, bh),
-                            label="Potted Plant",
+                            bbox=(bx_c, by_c, bw_c, bh_c),
+                            label="Plant",
                             confidence=score,
                             status=status,
                             healthy_pct=healthy_pct,
