@@ -9,8 +9,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from gui.modules.plant_ai import PlantAIDetector, PlantHealthResult, analyze_crop_health
-from scripts.download_samples import download_real_samples, SAMPLE_DIR
+from gui.modules.plant_ai import PlantAIDetector, PlantHealthResult, analyze_crop_health, hue_to_pseudo_ndvi
+
+SAMPLE_DIR = BASE_DIR / "tests" / "samples"
 
 
 def verify_pipeline():
@@ -18,8 +19,6 @@ def verify_pipeline():
     print("  CEA GREENHOUSE PLANT AI & STRESS VISION EVALUATION (REAL DATASET)")
     print("=" * 70)
 
-    # 1. Download / verify authentic real plant dataset
-    download_real_samples()
     samples = sorted(list(SAMPLE_DIR.glob("*.jpg")))
     print(f"Found {len(samples)} real plant test sample(s) in {SAMPLE_DIR}:\n")
 
@@ -54,7 +53,7 @@ def verify_pipeline():
         # If TPU is inactive or no SSD object detected, evaluate crop directly for testing
         eval_results = results
         if not eval_results:
-            status, healthy_pct, yellowing_pct, browning_pct, mean_hue, color, cov, unif = analyze_crop_health(img)
+            status, healthy_pct, yellowing_pct, browning_pct, mean_hue, color, cov = analyze_crop_health(img)
             if status != "NO VEGETATION":
                 eval_results = [
                     PlantHealthResult(
@@ -68,7 +67,7 @@ def verify_pipeline():
                         mean_hue=mean_hue,
                         color_bgr=color,
                         canopy_coverage=cov,
-                        uniformity_score=unif,
+                        vi=hue_to_pseudo_ndvi(mean_hue),
                     )
                 ]
 
@@ -78,7 +77,7 @@ def verify_pipeline():
         out_path = output_dir / f"annotated_{img_path.name}"
         cv2.imwrite(str(out_path), annotated)
 
-        heatmap = detector.draw_heatmap_overlay(img, eval_results, latency)
+        heatmap = detector.draw_full_frame_heatmap(img, latency)
         heatmap_path = output_dir / f"heatmap_{img_path.name}"
         cv2.imwrite(str(heatmap_path), heatmap)
 
@@ -87,8 +86,8 @@ def verify_pipeline():
         print(f"  Evaluated Plant Canopies: {len(eval_results)}")
         for idx, res in enumerate(eval_results):
             print(f"    [{idx+1}] {res.label} (Conf: {res.confidence*100:.1f}%) -> {res.status}")
-            print(f"        Coverage: {res.canopy_coverage:.1f}% | Uniformity: {res.uniformity_score:.1f}%")
-            print(f"        Foliage Breakdown: Healthy={res.healthy_pct:.1f}% | Yellowing={res.chlorosis_pct:.1f}% | Browning={res.necrosis_pct:.1f}% | Hue={res.mean_hue:.1f}°")
+            print(f"        Coverage: {res.canopy_coverage:.1f}% | VI (Pseudo-NDVI): {res.vi:.2f}")
+            print(f"        Foliage: Hue={res.mean_hue:.1f}°")
             print(f"        Bounding Box (x, y, w, h): {res.bbox}")
         print(f"  -> Saved annotated result: {out_path}")
         print(f"  -> Saved heatmap result:   {heatmap_path}\n")

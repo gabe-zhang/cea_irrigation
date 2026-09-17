@@ -177,16 +177,16 @@ def test_plot_window_layout_order_and_legend(headless_app):
     # 3. Top subplot is temperature & RH, Bottom is soil moisture
     assert plotter.ax_temp is not None
     assert plotter.ax_moist is not None
-    assert "Temperature" in plotter.ax_temp.get_ylabel()
-    assert "Relative Humidity" in plotter.ax_rh.get_ylabel()
-    assert "Soil Moisture" in plotter.ax_moist.get_ylabel()
+    assert "Air temp" in plotter.ax_temp.get_ylabel()
+    assert "Relative humidity" in plotter.ax_rh.get_ylabel()
+    assert "Soil moisture" in plotter.ax_moist.get_ylabel()
     assert plotter.ax_temp.get_subplotspec().rowspan.start < plotter.ax_moist.get_subplotspec().rowspan.start
 
-    # 4. Legends are positioned at upper right (loc code 1)
+    # 4. Legends are positioned at lower right (loc code 4)
     leg_temp = plotter.ax_temp.get_legend()
     leg_moist = plotter.ax_moist.get_legend()
-    assert leg_temp is not None and leg_temp._loc == 1
-    assert leg_moist is not None and leg_moist._loc == 1
+    assert leg_temp is not None and leg_temp._loc in (4, "lower right")
+    assert leg_moist is not None and leg_moist._loc in (4, "lower right")
 
     plotter.toggle(False)
 
@@ -242,6 +242,30 @@ def test_mainwindow_camera_loop_with_plant_ai(headless_app):
             mock_after.assert_called_with(30, app._camera_loop)
 
 
+def test_mainwindow_both_plant_ai_and_heatmap_overlays(headless_app):
+    """Verify that when both AI and Heatmap are active, heatmap overlays entire frame and AI shows bboxes."""
+    import numpy as np
+
+    app = headless_app
+    app.plant_ai_var.set(1)
+    app.heatmap_var.set(1)
+    dummy_frame = np.full((100, 100, 3), 180, dtype=np.uint8)
+    dummy_frame[30:70, 30:70] = (30, 200, 40)
+
+    with patch.object(app.plant_ai, "detect_and_analyze", return_value=([], 12.5)) as mock_detect:
+        with patch.object(app.plant_ai, "draw_full_frame_heatmap", wraps=app.plant_ai.draw_full_frame_heatmap) as mock_hmap:
+            with patch.object(app.plant_ai, "draw_overlay", wraps=app.plant_ai.draw_overlay) as mock_draw:
+                out, lat = app._apply_plant_ai_overlays(dummy_frame)
+                mock_detect.assert_called_once_with(dummy_frame)
+                mock_hmap.assert_called_once()
+                mock_draw.assert_called_once()
+                # Verify show_bbox=True was passed to draw_overlay
+                _, kwargs = mock_draw.call_args
+                assert kwargs.get("show_bbox") is True
+                assert lat == 12.5
+                assert out.shape == dummy_frame.shape
+
+
 def test_read_historical_telemetry_flow_rate_and_events(tmp_path):
     from scripts.generate_mock_watering import generate_mock_data
     from datetime import date, datetime
@@ -290,10 +314,10 @@ def test_plot_window_threshold_lines_and_dynamic_setpoint(headless_app):
 
 def test_plot_window_historical_water_volume_axis_and_bars(headless_app, tmp_path, monkeypatch):
     from scripts.generate_mock_watering import generate_mock_data
-    from datetime import date
+    from datetime import date, datetime
 
     monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
-    generate_mock_data(date(2026, 9, 11), tmp_path)
+    generate_mock_data(datetime.now().date(), tmp_path)
 
     app = headless_app
     plotter = PlotWindow(app, lambda: [35.0, 45.0, 55.0, 65.0], range_var=app.plot_range_var, setpoint_var=app.soil_water_setpoint)
@@ -307,7 +331,9 @@ def test_plot_window_historical_water_volume_axis_and_bars(headless_app, tmp_pat
     # Check secondary water volume axis
     ax_moist = plotter.fig.axes[2]  # Subplot 2,1,2 (ax_moist)
     ax_vol = plotter.fig.axes[3]    # Twinx secondary axis (ax_vol)
-    assert "Water Volume" in ax_vol.get_ylabel()
+    assert "Water volume" in ax_vol.get_ylabel()
+    assert "mL" in ax_vol.get_ylabel()
+    assert ax_vol.get_ylim() == (0.0, 1000.0)
 
     # Check that pump event bars were plotted on ax_vol
     bars = [c for c in ax_vol.containers]

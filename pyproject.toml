@@ -22,6 +22,13 @@ gui = [
 dev = [
     "pytest>=8.0.0",
 ]
+slides = [
+    "python-pptx>=1.0.2",
+    "qrcode>=8.0",
+    "pillow-heif>=1.7.0",
+    "matplotlib>=3.8.0",
+    "pillow>=10.0.0",
+]
 
 [tool.uv]
 package = false

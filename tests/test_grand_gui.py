@@ -436,3 +436,120 @@ def test_plot_window_range_trace_switching(headless_gui, tmp_path, monkeypatch):
     # Clean close
     plotter.toggle(False)
     assert plotter.window is None
+
+
+def test_plot_window_individual_pump_bars(headless_gui, tmp_path, monkeypatch):
+    """Verify that PlotWindow displays individual bars per pump, not a single combined bar."""
+    app = headless_gui
+    monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
+
+    header = (
+        "timestamp,soil1_raw,soil2_raw,soil3_raw,soil4_raw,"
+        "soil1_pct,soil2_pct,soil3_pct,soil4_pct,"
+        "soil_temp_c,air_temp_c,humidity_pct,light,relays,pan_deg,tilt_deg\n"
+    )
+    today = datetime.now().date()
+    t_str = today.strftime("%Y%m%d")
+    
+    # 4 pumps turn on at 10:00:00 and turn off at 10:00:06.840 (6.84 seconds -> 6.84 * (500/3600) = 0.950 L = 950 mL each)
+    row_idle = f"{today} 09:59:00,400,400,400,400,40.0,40.0,40.0,40.0,22.0,24.0,50.0,1000,0000,55,30\n"
+    row_on = f"{today} 10:00:00,400,400,400,400,40.0,40.0,40.0,40.0,22.0,24.0,50.0,1000,1111,55,30\n"
+    row_off = f"{today} 10:00:06.840,400,400,400,400,45.0,45.0,45.0,45.0,22.0,24.0,50.0,1000,0000,55,30\n"
+
+    (tmp_path / f"telemetry_{t_str}.csv").write_text(
+        header + row_idle + row_on + row_off,
+        encoding="utf-8"
+    )
+
+    plotter = PlotWindow(app, lambda: app.telemetry, range_var=app.plot_range_var)
+    app.plot_range_var.set("day")
+    plotter.toggle(True)
+
+    # Find the ax_vol secondary y-axis (ylabel is 'Water volume, mL')
+    ax_vol = None
+    for ax in plotter.fig.axes:
+        if "Water volume" in ax.get_ylabel():
+            ax_vol = ax
+            break
+    assert ax_vol is not None, "Secondary water volume axis (ax_vol) not found"
+
+    # Verify there are 4 separate bar patches, NOT 1 combined bar
+    patches = ax_vol.patches
+    assert len(patches) == 4, f"Expected 4 separate pump bars, found {len(patches)}"
+
+    # Verify each bar represents that specific pump's volume (950 mL)
+    for i, patch in enumerate(patches):
+        assert round(patch.get_height(), 1) == 950.0, f"Bar {i} height should be 950 mL, got {patch.get_height()}"
+
+    # Verify bars have distinct x positions (due to per-pump time offsets)
+    x_positions = [patch.get_x() for patch in patches]
+    assert len(set(x_positions)) == 4, "All 4 pump bars should have distinct x positions (side-by-side)"
+
+    plotter.toggle(False)
+
+
+def test_spinbox_large_buttons_and_gimbal_shrink(headless_gui):
+    app = headless_gui
+
+    # 1. Verify spinbox large buttons exist
+    assert hasattr(app, "btn_stop_down")
+    assert hasattr(app, "btn_stop_up")
+    assert hasattr(app, "btn_start_down")
+    assert hasattr(app, "btn_start_up")
+
+    # 2. Test turn on (start setpoint) adjustment buttons
+    app.soil_water_setpoint.set(40.0)
+    app.btn_start_up.invoke()
+    assert app.soil_water_setpoint.get() == 45.0
+    app.btn_start_down.invoke()
+    assert app.soil_water_setpoint.get() == 40.0
+
+    # Bounds clamping for start setpoint (10.0 to 90.0)
+    app.soil_water_setpoint.set(88.0)
+    app.btn_start_up.invoke()
+    assert app.soil_water_setpoint.get() == 90.0
+    app.btn_start_up.invoke()
+    assert app.soil_water_setpoint.get() == 90.0
+
+    app.soil_water_setpoint.set(12.0)
+    app.btn_start_down.invoke()
+    assert app.soil_water_setpoint.get() == 10.0
+    app.btn_start_down.invoke()
+    assert app.soil_water_setpoint.get() == 10.0
+
+    # 3. Test turn off (stop setpoint) adjustment buttons
+    app.soil_water_stop_setpoint.set(80.0)
+    app.btn_stop_up.invoke()
+    assert app.soil_water_stop_setpoint.get() == 85.0
+    app.btn_stop_down.invoke()
+    assert app.soil_water_stop_setpoint.get() == 80.0
+
+    # Bounds clamping for stop setpoint (10.0 to 100.0)
+    app.soil_water_stop_setpoint.set(98.0)
+    app.btn_stop_up.invoke()
+    assert app.soil_water_stop_setpoint.get() == 100.0
+    app.btn_stop_up.invoke()
+    assert app.soil_water_stop_setpoint.get() == 100.0
+
+    app.soil_water_stop_setpoint.set(12.0)
+    app.btn_stop_down.invoke()
+    assert app.soil_water_stop_setpoint.get() == 10.0
+    app.btn_stop_down.invoke()
+    assert app.soil_water_stop_setpoint.get() == 10.0
+
+    # 4. Verify gimbal buttons shrunk (font size <= 30)
+    assert hasattr(app, "btn_tilt_up")
+    assert hasattr(app, "btn_pan_left")
+    assert hasattr(app, "btn_pan_right")
+    assert hasattr(app, "btn_tilt_down")
+    assert hasattr(app, "btn_home")
+
+    gimbal_font = app.btn_tilt_up.cget("font")
+    if isinstance(gimbal_font, (tuple, list)):
+        size = int(gimbal_font[1])
+    else:
+        parts = str(gimbal_font).split()
+        size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 26
+    assert size <= 30, f"Gimbal button font size {size} is too large, should be <= 30"
+
+

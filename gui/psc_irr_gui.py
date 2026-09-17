@@ -75,7 +75,7 @@ GIMBAL_STEP = 5  # degrees per nudge click
 
 # Interval mapping
 DATA_INTERVAL_MAP = {"10s": 10_000, "1min": 60_000, "1hr": 3_600_000}
-IMAGE_INTERVAL_MAP = {"sec": 1_000, "min": 60_000, "hr": 3_600_000, "day": 86_400_000}
+IMAGE_INTERVAL_MAP = {"1sec": 1_000, "1min": 60_000, "1hr": 3_600_000, "1day": 86_400_000}
 
 
 def parse_interval_to_ms(val: str, default_ms: int = 10_000) -> int:
@@ -87,17 +87,18 @@ def parse_interval_to_ms(val: str, default_ms: int = 10_000) -> int:
         return default_ms
     s = str(val).strip().lower()
     mapping = {
+        "1sec": 1_000,
         "sec": 1_000,
         "1s": 1_000,
         "10s": 10_000,
+        "1min": 60_000,
         "min": 60_000,
         "1m": 60_000,
-        "1min": 60_000,
+        "1hr": 3_600_000,
         "hr": 3_600_000,
         "1h": 3_600_000,
-        "1hr": 3_600_000,
-        "day": 86_400_000,
         "1day": 86_400_000,
+        "day": 86_400_000,
         "24hr": 86_400_000,
     }
     return mapping.get(s, default_ms)
@@ -361,11 +362,13 @@ class PlotWindow:
         get_telemetry_fn,
         range_var: tk.StringVar | None = None,
         setpoint_var: tk.DoubleVar | None = None,
+        stop_setpoint_var: tk.DoubleVar | None = None,
     ) -> None:
         self.master = master
         self.get_telemetry = get_telemetry_fn
         self.range_var = range_var or tk.StringVar(value="min")
         self.setpoint_var = setpoint_var or getattr(master, "soil_water_setpoint", None)
+        self.stop_setpoint_var = stop_setpoint_var or getattr(master, "soil_water_stop_setpoint", None)
         self.window: tk.Toplevel | None = None
         self.canvas_widget: FigureCanvasTkAgg | None = None
         self.ani: animation.FuncAnimation | None = None
@@ -392,8 +395,11 @@ class PlotWindow:
         self._init_live_figure()
         self._trace_id = self.range_var.trace_add("write", self._on_range_changed)
         self._sp_trace_id = None
+        self._stop_sp_trace_id = None
         if self.setpoint_var:
             self._sp_trace_id = self.setpoint_var.trace_add("write", self._on_setpoint_changed)
+        if self.stop_setpoint_var:
+            self._stop_sp_trace_id = self.stop_setpoint_var.trace_add("write", self._on_stop_setpoint_changed)
 
     def _on_setpoint_changed(self, *args) -> None:
         if self.window and tk.Toplevel.winfo_exists(self.window):
@@ -411,36 +417,52 @@ class PlotWindow:
                 self._render_current_mode()
             self.window.lift()
 
+    def _on_stop_setpoint_changed(self, *args) -> None:
+        if self.window and tk.Toplevel.winfo_exists(self.window):
+            mode = self.range_var.get().strip().lower()
+            if mode == "min":
+                try:
+                    ssp = float(self.stop_setpoint_var.get())
+                    if hasattr(self, "line_stop") and self.line_stop:
+                        self.line_stop.set_ydata([ssp, ssp])
+                    if self.canvas_widget:
+                        self.canvas_widget.draw_idle()
+                except Exception:
+                    pass
+            else:
+                self._render_current_mode()
+            self.window.lift()
+
     def _init_live_figure(self) -> None:
         self.fig.clf()
-        self.fig.suptitle("Environmental Telemetry & Soil Moisture (Last 60s)", fontsize=24, fontweight="bold")
+        self.fig.suptitle("Environmental telemetry and soil moisture (Last 60 sec)", fontsize=24, fontweight="bold")
 
-        # Top Plot: Temperatures (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
+        # Top Plot: Air temp & Soil temp (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
         self.ax_temp = self.fig.add_subplot(2, 1, 1)
         self.ax_rh = self.ax_temp.twinx()
 
-        (self.line_temp,) = self.ax_temp.plot([], [], color="#d62728", linewidth=3.6, label="Air Temp (°C)")
+        (self.line_temp,) = self.ax_temp.plot([], [], color="#d62728", linewidth=3.6, label="Air temp, °C")
         (self.line_soil_temp,) = self.ax_temp.plot(
-            [], [], color="#d95f02", linewidth=3.6, linestyle="--", label="Soil Temp (°C)"
+            [], [], color="#d95f02", linewidth=3.6, linestyle="--", label="Soil temp, °C"
         )
-        (self.line_rh,) = self.ax_rh.plot([], [], color="#00838f", linewidth=3.6, label="RH (%)")
+        (self.line_rh,) = self.ax_rh.plot([], [], color="#00838f", linewidth=3.6, label="RH, %")
 
         self.ax_temp.set_ylim(0, 50)
         self.ax_temp.set_xlim(0, 60)
         self.ax_temp.set_xticks([0, 10, 20, 30, 40, 50, 60])
-        self.ax_temp.set_ylabel("Temperature (°C)", fontsize=20, fontweight="bold", color="#d62728")
+        self.ax_temp.set_ylabel("Air temp, °C", fontsize=20, fontweight="bold", color="#d62728")
         self.ax_temp.tick_params(axis="x", labelsize=18)
         self.ax_temp.tick_params(axis="y", labelcolor="#d62728", labelsize=18)
         self.ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
 
         self.ax_rh.set_ylim(0, 100)
-        self.ax_rh.set_ylabel("Relative Humidity (%)", fontsize=20, fontweight="bold", color="#00838f")
+        self.ax_rh.set_ylabel("Relative humidity, %", fontsize=20, fontweight="bold", color="#00838f")
         self.ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=18)
 
         self.ax_temp.legend(
             [self.line_temp, self.line_soil_temp, self.line_rh],
-            ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"],
-            loc="upper right",
+            ["Air temp, °C", "Soil temp, °C", "RH, %"],
+            loc="lower right",
             fontsize=18,
             ncol=3,
             framealpha=0.92,
@@ -454,21 +476,22 @@ class PlotWindow:
             self.lines_moist.append(line)
 
         sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
+        ssp = float(self.stop_setpoint_var.get()) if self.stop_setpoint_var else SCHEDULED_TARGET_PCT
         self.line_setpoint = self.ax_moist.axhline(
             sp, color="#e63946", linestyle="--", linewidth=2.5
         )
         self.line_stop = self.ax_moist.axhline(
-            SCHEDULED_TARGET_PCT, color="#2ecc71", linestyle="--", linewidth=2.5
+            ssp, color="#2ecc71", linestyle="--", linewidth=2.5
         )
 
         self.ax_moist.set_ylim(0, 100)
         self.ax_moist.set_xlim(0, 60)
         self.ax_moist.set_xticks([0, 10, 20, 30, 40, 50, 60])
-        self.ax_moist.set_xlabel("Time (s)", fontsize=20, fontweight="bold")
-        self.ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
+        self.ax_moist.set_xlabel("Time, sec", fontsize=20, fontweight="bold")
+        self.ax_moist.set_ylabel("Soil moisture, %", fontsize=20, fontweight="bold")
         self.ax_moist.tick_params(axis="both", labelsize=18)
         self.ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
-        self.ax_moist.legend(loc="upper right", fontsize=18, ncol=4, framealpha=0.92)
+        self.ax_moist.legend(loc="lower right", fontsize=18, ncol=4, framealpha=0.92)
 
         self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
         self.fig.subplots_adjust(hspace=0.35)
@@ -485,13 +508,21 @@ class PlotWindow:
                 ha="center", va="center", fontsize=20, color="#6c757d", fontweight="bold"
             )
             ax.axis("off")
-            self.fig.suptitle(f"Environmental Telemetry & Soil Moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if mode == "day":
+                self.fig.suptitle(f"Environmental telemetry and soil moisture (Day \u2014 {today_str})", fontsize=24, fontweight="bold")
+            else:
+                self.fig.suptitle(f"Environmental telemetry and soil moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
             self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
             return
 
-        self.fig.suptitle(f"Environmental Telemetry & Soil Moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if mode == "day":
+            self.fig.suptitle(f"Environmental telemetry and soil moisture (Day \u2014 {today_str})", fontsize=24, fontweight="bold")
+        else:
+            self.fig.suptitle(f"Environmental telemetry and soil moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
 
-        # Top Plot: Temperatures (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
+        # Top Plot: Air temp & Soil temp (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
         ax_temp = self.fig.add_subplot(2, 1, 1)
         ax_rh = ax_temp.twinx()
 
@@ -499,23 +530,23 @@ class PlotWindow:
         y_soil = [v if v is not None else np.nan for v in hist["soil_temp"]]
         y_rh = [v if v is not None else np.nan for v in hist["humidity"]]
 
-        (l_t,) = ax_temp.plot(ts, y_temp, color="#d62728", linewidth=2.8, label="Air Temp (°C)")
-        (l_s,) = ax_temp.plot(ts, y_soil, color="#d95f02", linewidth=2.8, linestyle="--", label="Soil Temp (°C)")
-        (l_rh,) = ax_rh.plot(ts, y_rh, color="#00838f", linewidth=2.8, label="RH (%)")
+        (l_t,) = ax_temp.plot(ts, y_temp, color="#d62728", linewidth=2.8, label="Air temp, °C")
+        (l_s,) = ax_temp.plot(ts, y_soil, color="#d95f02", linewidth=2.8, linestyle="--", label="Soil temp, °C")
+        (l_rh,) = ax_rh.plot(ts, y_rh, color="#00838f", linewidth=2.8, label="RH, %")
 
         ax_temp.set_ylim(0, 50)
-        ax_temp.set_ylabel("Temperature (°C)", fontsize=20, fontweight="bold", color="#d62728")
+        ax_temp.set_ylabel("Air temp, °C", fontsize=20, fontweight="bold", color="#d62728")
         ax_temp.tick_params(axis="both", labelsize=16)
         ax_temp.tick_params(axis="y", labelcolor="#d62728")
         ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
 
         ax_rh.set_ylim(0, 100)
-        ax_rh.set_ylabel("Relative Humidity (%)", fontsize=20, fontweight="bold", color="#00838f")
+        ax_rh.set_ylabel("Relative humidity, %", fontsize=20, fontweight="bold", color="#00838f")
         ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=16)
 
-        ax_temp.legend([l_t, l_s, l_rh], ["Air Temp (°C)", "Soil Temp (°C)", "RH (%)"], loc="upper right", fontsize=16, ncol=3, framealpha=0.92)
+        ax_temp.legend([l_t, l_s, l_rh], ["Air temp, °C", "Soil temp, °C", "RH, %"], loc="lower right", fontsize=16, ncol=3, framealpha=0.92)
 
-        # Bottom Plot: Soil Moisture (0-100%) & Secondary Water Volume Axis (L)
+        # Bottom Plot: Soil Moisture (0-100%) & Secondary Water Volume Axis (mL)
         ax_moist = self.fig.add_subplot(2, 1, 2, sharex=ax_temp)
         ax_vol = ax_moist.twinx()
 
@@ -524,15 +555,16 @@ class PlotWindow:
             ax_moist.plot(ts, y_vals, color=c, linewidth=2.8, label=f"S{i+1}")
 
         sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
+        ssp = float(self.stop_setpoint_var.get()) if self.stop_setpoint_var else SCHEDULED_TARGET_PCT
         ax_moist.axhline(sp, color="#e63946", linestyle="--", linewidth=2.2)
-        ax_moist.axhline(SCHEDULED_TARGET_PCT, color="#2ecc71", linestyle="--", linewidth=2.2)
+        ax_moist.axhline(ssp, color="#2ecc71", linestyle="--", linewidth=2.2)
 
         ax_moist.set_ylim(0, 100)
-        ax_moist.set_ylabel("Soil Moisture (%)", fontsize=20, fontweight="bold")
+        ax_moist.set_ylabel("Soil moisture, %", fontsize=20, fontweight="bold")
         ax_moist.tick_params(axis="both", labelsize=16)
         ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
 
-        # Plot water volume bars on ax_vol for any pump events
+        # Plot water volume bars on ax_vol for any pump events (converted to mL)
         pump_events = hist.get("pump_events", [])
         if mode == "day":
             base_w = timedelta(minutes=10)
@@ -544,16 +576,15 @@ class PlotWindow:
             base_w = timedelta(hours=4)
             offsets = [timedelta(hours=h) for h in (-6, -2, 2, 6)]
 
-        max_vol = 0.0
         for ev in pump_events:
             p_idx = ev["pump"]
-            vol = ev["volume"]
+            vol_l = ev["volume"]
+            vol_ml = vol_l * 1000.0
             ev_ts = ev["timestamp"]
-            if vol > 0:
-                max_vol = max(max_vol, vol)
+            if vol_ml > 0:
                 ax_vol.bar(
                     ev_ts + offsets[p_idx],
-                    vol,
+                    vol_ml,
                     width=base_w,
                     color=self.colors[p_idx],
                     alpha=0.45,
@@ -561,21 +592,27 @@ class PlotWindow:
                     linewidth=1.5,
                 )
 
-        ax_vol.set_ylabel("Water Volume (L)", fontsize=20, fontweight="bold", color="#0288d1")
+        ax_vol.set_ylabel("Water volume, mL", fontsize=20, fontweight="bold", color="#0288d1")
         ax_vol.tick_params(axis="y", labelcolor="#0288d1", labelsize=16)
         ax_vol.grid(False)
-        ax_vol.set_ylim(0, max(max_vol * 1.35, 15.0))
+        ax_vol.set_ylim(0, 1000)
 
         if mode == "day":
+            # Fixed 24-hour x-axis from midnight to midnight of current date
+            today = datetime.now().date()
+            ax_moist.set_xlim(
+                datetime.combine(today, datetime.min.time()),
+                datetime.combine(today, datetime.max.time().replace(microsecond=0))
+            )
             ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
         elif mode == "week":
-            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d\n%H:%M"))
+            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
         else:  # month
             ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
-        ax_moist.set_xlabel("Date / Time", fontsize=18, fontweight="bold")
+        ax_moist.set_xlabel("Date / time", fontsize=18, fontweight="bold")
 
         ax_moist.legend(
-            loc="upper right",
+            loc="lower right",
             fontsize=16,
             ncol=4,
             framealpha=0.92,
@@ -704,6 +741,18 @@ class PlotWindow:
                     except Exception:
                         pass
                 self.window.protocol("WM_DELETE_WINDOW", lambda: (self.toggle(False), on_close and on_close()))
+                btn_close = tk.Button(
+                    self.window,
+                    text="✕ Close",
+                    font=("arial", 20, "bold"),
+                    bg="#dc3545",
+                    fg="white",
+                    activebackground="#bb2d3b",
+                    activeforeground="white",
+                    bd=3,
+                    command=lambda: (self.toggle(False), on_close and on_close()),
+                )
+                btn_close.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=6, ipady=8)
                 self.canvas_widget = FigureCanvasTkAgg(self.fig, master=self.window)
                 self.canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)
                 self._render_current_mode()
@@ -760,6 +809,9 @@ class MainWindow(tk.Tk):
         # State Models & Options
         self.auto_var = tk.IntVar(value=1)
         self.soil_water_setpoint = tk.DoubleVar(value=SOIL_WATER_SETPOINT)
+        self.soil_water_stop_setpoint = tk.DoubleVar(value=SCHEDULED_TARGET_PCT)
+        self.start_setpoint_display = tk.StringVar(value=f"{SOIL_WATER_SETPOINT:.0f}%")
+        self.stop_setpoint_display = tk.StringVar(value=f"{SCHEDULED_TARGET_PCT:.0f}%")
         self.plot_var = tk.IntVar(value=0)
         self.plot_range_var = tk.StringVar(value="min")
         self.data_record_var = tk.StringVar(value="10s")
@@ -785,15 +837,13 @@ class MainWindow(tk.Tk):
 
         self._build_bottom_bar(left_frame)
 
-        # Canvas with Scrollbars (Left Camera Canvas)
-        self.y_scrl = tk.Scrollbar(left_frame, orient=tk.VERTICAL)
-        self.y_scrl.pack(fill=tk.Y, side=tk.RIGHT)
-        self.x_scrl = tk.Scrollbar(left_frame, orient=tk.HORIZONTAL)
-        self.x_scrl.pack(fill=tk.X, side=tk.BOTTOM)
-        self.canvas = tk.Canvas(left_frame, yscrollcommand=self.y_scrl.set, xscrollcommand=self.x_scrl.set, bg="black")
+        # Left Camera Canvas (scrollbars removed, frame fits automatically)
+        self.x_scrl = None
+        self.y_scrl = None
+        self._last_display_img: np.ndarray | Image.Image | None = None
+        self.canvas = tk.Canvas(left_frame, bg="black", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.y_scrl.config(command=self.canvas.yview)
-        self.x_scrl.config(command=self.canvas.xview)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
 
         # Scrollable Sidebar Container
         self.sidebar_canvas = tk.Canvas(right_frame, bg="#f8f9fa", highlightthickness=0)
@@ -833,13 +883,36 @@ class MainWindow(tk.Tk):
         self._start_periodic_loggers()
         self._start_scheduled_ticker()
 
+    def _adjust_stop_setpoint(self, delta: float) -> None:
+        try:
+            cur = float(self.soil_water_stop_setpoint.get())
+        except (ValueError, tk.TclError):
+            cur = SCHEDULED_TARGET_PCT
+        new_val = round(cur + delta, 1)
+        new_val = max(10.0, min(100.0, new_val))
+        self.soil_water_stop_setpoint.set(new_val)
+
+    def _adjust_start_setpoint(self, delta: float) -> None:
+        try:
+            cur = float(self.soil_water_setpoint.get())
+        except (ValueError, tk.TclError):
+            cur = SOIL_WATER_SETPOINT
+        new_val = round(cur + delta, 1)
+        new_val = max(10.0, min(90.0, new_val))
+        self.soil_water_setpoint.set(new_val)
+
+    def _update_setpoint_displays(self, *_args) -> None:
+        """Keep the large threshold readouts synchronized with their variables."""
+        self.start_setpoint_display.set(f"{float(self.soil_water_setpoint.get()):.0f}%")
+        self.stop_setpoint_display.set(f"{float(self.soil_water_stop_setpoint.get()):.0f}%")
+
     def _build_sidebar_cards(self) -> None:
         # Card 1: IRRIGATION
         card_irrigation = tk.LabelFrame(
             self.sidebar_content, text=" IRRIGATION ", font=("arial", 17, "bold"),
             bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
         )
-        card_irrigation.pack(fill=tk.X, padx=10, pady=(10, 8))
+        card_irrigation.pack(fill=tk.X, padx=10, pady=(6, 5))
         card_irrigation.grid_columnconfigure(0, weight=1)
         card_irrigation.grid_columnconfigure(1, weight=1)
 
@@ -848,27 +921,74 @@ class MainWindow(tk.Tk):
             selectcolor="#2ecc71", bd=3, indicatoron=False, variable=self.auto_var,
             command=self._on_auto_toggle
         )
-        self.ckb_auto.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+        self.ckb_auto.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
 
         set_box = tk.Frame(card_irrigation, bg="white")
         set_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
-        tk.Label(set_box, text="Set:", font=("arial", 20, "bold"), bg="white").pack(side=tk.LEFT, padx=(4, 2))
-        self.spn_setpoint = tk.Spinbox(
-            set_box, from_=10, to=90, increment=5, textvariable=self.soil_water_setpoint,
-            font=("arial", 20, "bold"), width=3, justify="center"
+        # Top row: Turn off at (stop threshold)
+        self.off_row = tk.Frame(set_box, bg="white")
+        off_row = self.off_row
+        off_row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(2, 1))
+        tk.Label(off_row, text="Turn off at", font=("arial", 18, "bold"), bg="white").pack(side=tk.LEFT, padx=(2, 5))
+        tk.Label(
+            off_row, textvariable=self.stop_setpoint_display, font=("arial", 22, "bold"),
+            bg="white", width=4, anchor="e"
+        ).pack(side=tk.LEFT, padx=(1, 4))
+        self.btn_stop_down = tk.Button(
+            off_row, text="−", font=("arial", 19, "bold"), width=2, bd=2, bg="#f1f3f5",
+            activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
+            command=lambda: self._adjust_stop_setpoint(-5.0)
         )
-        self.spn_setpoint.pack(side=tk.LEFT, padx=2)
-        tk.Label(set_box, text="%", font=("arial", 20, "bold"), bg="white").pack(side=tk.LEFT, padx=(2, 4))
+        self.btn_stop_down.pack(side=tk.LEFT, padx=(1, 2))
+        self.btn_stop_up = tk.Button(
+            off_row, text="+", font=("arial", 19, "bold"), width=2, bd=2, bg="#f1f3f5",
+            activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
+            command=lambda: self._adjust_stop_setpoint(5.0)
+        )
+        self.btn_stop_up.pack(side=tk.LEFT, padx=(2, 2))
+
+        # Bottom row: Turn on at (start threshold)
+        self.on_row = tk.Frame(set_box, bg="white")
+        on_row = self.on_row
+        on_row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(1, 2))
+        tk.Label(on_row, text="Turn on at", font=("arial", 18, "bold"), bg="white").pack(side=tk.LEFT, padx=(2, 5))
+        tk.Label(
+            on_row, textvariable=self.start_setpoint_display, font=("arial", 22, "bold"),
+            bg="white", width=4, anchor="e"
+        ).pack(side=tk.LEFT, padx=(1, 4))
+        self.btn_start_down = tk.Button(
+            on_row, text="−", font=("arial", 19, "bold"), width=2, bd=2, bg="#f1f3f5",
+            activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
+            command=lambda: self._adjust_start_setpoint(-5.0)
+        )
+        self.btn_start_down.pack(side=tk.LEFT, padx=(1, 2))
+        self.btn_start_up = tk.Button(
+            on_row, text="+", font=("arial", 19, "bold"), width=2, bd=2, bg="#f1f3f5",
+            activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
+            command=lambda: self._adjust_start_setpoint(5.0)
+        )
+        self.btn_start_up.pack(side=tk.LEFT, padx=(2, 2))
+        self.btn_setpoint_down = self.btn_start_down
+        self.btn_setpoint_up = self.btn_start_up
+        self.btn_manual_mode = tk.Button(
+            card_irrigation, text="Manual", font=("arial", 23, "bold"), bg="#6c757d", fg="white",
+            activebackground="#5c636a", activeforeground="white", bd=3,
+            command=lambda: (self.auto_var.set(1), self._on_auto_toggle())
+        )
+        self.btn_manual_mode.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
+        self.soil_water_setpoint.trace_add("write", self._update_setpoint_displays)
+        self.soil_water_stop_setpoint.trace_add("write", self._update_setpoint_displays)
 
         self.water_frame = tk.Frame(card_irrigation, bg="white")
         self.water_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6, pady=(2, 8))
         self.water_vars: list[tk.IntVar] = []
         self.water_btns: list[tk.Checkbutton] = []
         self.rebuild_relays(4)
+        self._on_auto_toggle()
 
         # Card 2: PLOT (Untitled card with groove border)
         card_plot = tk.Frame(self.sidebar_content, relief=tk.GROOVE, bd=2, bg="#ffffff")
-        card_plot.pack(fill=tk.X, padx=10, pady=8)
+        card_plot.pack(fill=tk.X, padx=10, pady=5)
         card_plot.grid_columnconfigure(0, weight=1)
         card_plot.grid_columnconfigure(1, weight=1)
 
@@ -877,13 +997,13 @@ class MainWindow(tk.Tk):
             selectcolor="#b0bec5", bd=3, indicatoron=False, variable=self.plot_var,
             command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0))
         )
-        self.ckb_plot.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+        self.ckb_plot.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
 
         range_box = tk.Frame(card_plot, bg="white")
         range_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
         tk.Label(range_box, text="Range:", font=("arial", 18, "bold"), bg="white").pack(side=tk.LEFT, padx=(4, 2))
         self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day", "week", "month")
-        self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=4)
+        self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
         try:
             self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
         except Exception:
@@ -895,38 +1015,38 @@ class MainWindow(tk.Tk):
             self.sidebar_content, text=" RECORD ", font=("arial", 17, "bold"),
             bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
         )
-        card_record.pack(fill=tk.X, padx=10, pady=8)
+        card_record.pack(fill=tk.X, padx=10, pady=5)
         card_record.grid_columnconfigure(0, weight=1)
         card_record.grid_columnconfigure(1, weight=2)
 
         tk.Label(card_record, text="Data  :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
-            row=0, column=0, sticky="w", padx=(10, 4), pady=5
+            row=0, column=0, sticky="w", padx=(10, 4), pady=4
         )
         self.data_record_dropdown = tk.OptionMenu(card_record, self.data_record_var, "10s", "1min", "1hr")
-        self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=4)
+        self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
         try:
             self.data_record_dropdown["menu"].config(font=("arial", 15, "bold"))
         except Exception:
             pass
-        self.data_record_dropdown.grid(row=0, column=1, sticky="ew", padx=(4, 10), pady=5)
+        self.data_record_dropdown.grid(row=0, column=1, sticky="ew", padx=(4, 10), pady=4)
 
         tk.Label(card_record, text="Image :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
-            row=1, column=0, sticky="w", padx=(10, 4), pady=5
+            row=1, column=0, sticky="w", padx=(10, 4), pady=4
         )
-        self.image_record_dropdown = tk.OptionMenu(card_record, self.image_record_var, "sec", "min", "hr", "day")
-        self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=4)
+        self.image_record_dropdown = tk.OptionMenu(card_record, self.image_record_var, "1sec", "1min", "1hr", "1day")
+        self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
         try:
             self.image_record_dropdown["menu"].config(font=("arial", 15, "bold"))
         except Exception:
             pass
-        self.image_record_dropdown.grid(row=1, column=1, sticky="ew", padx=(4, 10), pady=5)
+        self.image_record_dropdown.grid(row=1, column=1, sticky="ew", padx=(4, 10), pady=4)
 
         # Card 4: IMAGE
         card_image = tk.LabelFrame(
             self.sidebar_content, text=" IMAGE ", font=("arial", 17, "bold"),
             bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
         )
-        card_image.pack(fill=tk.X, padx=10, pady=8)
+        card_image.pack(fill=tk.X, padx=10, pady=5)
         card_image.grid_columnconfigure(0, weight=1)
         card_image.grid_columnconfigure(1, weight=1)
 
@@ -935,13 +1055,13 @@ class MainWindow(tk.Tk):
             selectcolor="#f1c40f", bd=3, indicatoron=False, variable=self.live_var,
             command=self._on_live_toggle
         )
-        self.ckb_live.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+        self.ckb_live.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
 
         self.btn_capture = tk.Button(
             card_image, text="Capture", font=("arial", 23, "bold"), bg="white", fg="black",
             activebackground="white", activeforeground="black", bd=3, command=self._on_capture
         )
-        self.btn_capture.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4, ipady=15)
+        self.btn_capture.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4, ipady=10)
         self._bind_capture_click_hold()
 
         # Card 5: PLANT
@@ -949,39 +1069,39 @@ class MainWindow(tk.Tk):
             self.sidebar_content, text=" PLANT ", font=("arial", 17, "bold"),
             bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
         )
-        card_plant.pack(fill=tk.X, padx=10, pady=8)
+        card_plant.pack(fill=tk.X, padx=10, pady=5)
         card_plant.grid_columnconfigure(0, weight=1)
         card_plant.grid_columnconfigure(1, weight=1)
 
         self.ckb_plant_ai = tk.Checkbutton(
-            card_plant, text="AI", font=("arial", 23, "bold"), bg="white",
+            card_plant, text="AI", font=("arial", 25, "bold"), bg="white",
             selectcolor="#ffb703", bd=3, indicatoron=False, variable=self.plant_ai_var,
             command=self._on_plant_ai_toggle
         )
-        self.ckb_plant_ai.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=15)
+        self.ckb_plant_ai.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
 
         self.ckb_heatmap = tk.Checkbutton(
-            card_plant, text="Heatmap", font=("arial", 23, "bold"), bg="white",
+            card_plant, text="Heatmap", font=("arial", 25, "bold"), bg="white",
             selectcolor="#e63946", bd=3, indicatoron=False, variable=self.heatmap_var,
             command=self._on_heatmap_toggle
         )
-        self.ckb_heatmap.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4, ipady=15)
+        self.ckb_heatmap.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4, ipady=10)
 
         # Card 6: Camera Gimbal (Untitled card with groove border)
         self.gimbal_frame = tk.Frame(self.sidebar_content, bg="#f8f9fa", bd=2, relief=tk.GROOVE)
-        self.gimbal_frame.pack(fill=tk.X, padx=10, pady=(10, 4))
+        self.gimbal_frame.pack(fill=tk.X, padx=10, pady=(6, 4))
         for i in range(3):
             self.gimbal_frame.grid_columnconfigure(i, weight=1, uniform="g_col")
             self.gimbal_frame.grid_rowconfigure(i, weight=1, uniform="g_row")
 
         self.lbl_gimbal = tk.Label(
-            self.gimbal_frame, text="Camera Gimbal", font=("arial", 15, "bold"),
+            self.gimbal_frame, text="Camera\nGimbal", font=("arial", 22, "bold"),
             fg="#0d6efd", bg="#f8f9fa"
         )
-        self.lbl_gimbal.grid(row=0, column=0, sticky="nsew", padx=3, pady=2)
+        self.lbl_gimbal.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
         gcfg = {
-            "font": ("arial", 24, "bold"), "bd": 3, "bg": "#495057", "fg": "white",
+            "font": ("arial", 30, "bold"), "bd": 3, "bg": "#495057", "fg": "white",
             "activebackground": "#6c757d", "activeforeground": "white"
         }
         dpad = [
@@ -992,57 +1112,38 @@ class MainWindow(tk.Tk):
         ]
         for attr, text, r, c, action in dpad:
             btn = tk.Button(self.gimbal_frame, text=text, **gcfg)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=2, ipady=11)
+            btn.grid(row=r, column=c, sticky="nsew", padx=4, pady=4, ipady=8)
             btn.bind("<ButtonPress-1>", lambda e, a=action: self._start_repeat(a))
             btn.bind("<ButtonRelease-1>", self._stop_repeat)
             btn.bind("<Leave>", self._stop_repeat)
             setattr(self, attr, btn)
 
         self.btn_home = tk.Button(
-            self.gimbal_frame, text="Home", font=("arial", 17, "bold"), bd=3,
+            self.gimbal_frame, text="Home", font=("arial", 25, "bold"), bd=3,
             bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white",
             command=self.home_gimbal
         )
-        self.btn_home.grid(row=1, column=1, sticky="nsew", padx=3, pady=2, ipady=11)
-        for i in range(3):
-            self.gimbal_frame.grid_columnconfigure(i, weight=1, uniform="g_col")
-            self.gimbal_frame.grid_rowconfigure(i, weight=1, uniform="g_row")
-
-        self.lbl_gimbal = tk.Label(
-            self.gimbal_frame, text="Camera Gimbal", font=("arial", 13, "bold"),
-            fg="#0d6efd", bg="#f8f9fa"
-        )
-        self.lbl_gimbal.grid(row=0, column=0, sticky="nsew", padx=3, pady=2)
-
-        gcfg = {
-            "font": ("arial", 22, "bold"), "bd": 3, "bg": "#495057", "fg": "white",
-            "activebackground": "#6c757d", "activeforeground": "white"
-        }
-        dpad = [
-            ("btn_tilt_up", "▲", 0, 1, lambda: self.nudge_tilt(-GIMBAL_STEP)),
-            ("btn_pan_left", "◀", 1, 0, lambda: self.nudge_pan(GIMBAL_STEP)),
-            ("btn_pan_right", "▶", 1, 2, lambda: self.nudge_pan(-GIMBAL_STEP)),
-            ("btn_tilt_down", "▼", 2, 1, lambda: self.nudge_tilt(GIMBAL_STEP)),
-        ]
-        for attr, text, r, c, action in dpad:
-            btn = tk.Button(self.gimbal_frame, text=text, **gcfg)
-            btn.grid(row=r, column=c, sticky="nsew", padx=3, pady=2, ipady=9)
-            btn.bind("<ButtonPress-1>", lambda e, a=action: self._start_repeat(a))
-            btn.bind("<ButtonRelease-1>", self._stop_repeat)
-            btn.bind("<Leave>", self._stop_repeat)
-            setattr(self, attr, btn)
-
-        self.btn_home = tk.Button(
-            self.gimbal_frame, text="Home", font=("arial", 15, "bold"), bd=3,
-            bg="#0d6efd", fg="white", activebackground="#0b5ed7", activeforeground="white",
-            command=self.home_gimbal
-        )
-        self.btn_home.grid(row=1, column=1, sticky="nsew", padx=3, pady=2, ipady=9)
+        self.btn_home.grid(row=1, column=1, sticky="nsew", padx=4, pady=4, ipady=8)
 
     def _build_bottom_bar(self, parent: tk.Frame) -> None:
         bar = tk.Frame(parent, bg="#1a1d20", height=130, relief=tk.GROOVE, bd=3)
         bar.pack(side=tk.BOTTOM, fill=tk.X, padx=2, pady=2)
         bar.pack_propagate(False)
+
+        self.btn_exit = tk.Button(
+            bar,
+            text="✕ Exit",
+            font=("arial", 18, "bold"),
+            bg="#dc3545",
+            fg="white",
+            activebackground="#bb2d3b",
+            activeforeground="white",
+            bd=3,
+            padx=16,
+            pady=8,
+            command=self.on_closing,
+        )
+        self.btn_exit.pack(side=tk.RIGHT, padx=14, pady=10)
 
         row1 = tk.Frame(bar, bg="#1a1d20")
         row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(6, 0))
@@ -1051,9 +1152,9 @@ class MainWindow(tk.Tk):
         self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 16, "bold"), fg="#06d6a0", bg="#1a1d20")
         self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 16, "bold"), fg="#ffd166", bg="#1a1d20")
         self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 16, "bold"), fg="#4cc9f0", bg="#1a1d20")
-        self.lbl_light = tk.Label(row1, text="Light: --", font=("arial", 16, "bold"), fg="#f72585", bg="#1a1d20")
+        self.lbl_light = tk.Label(row1, text="Light: -- lux", font=("arial", 16, "bold"), fg="#f72585", bg="#1a1d20")
         
-        tpu_init_text = "TPU: Ready" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "TPU: Disconnected"
+        tpu_init_text = "AI: Ready" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "TPU: Disconnected"
         tpu_init_color = "#06d6a0" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "#e63946"
         self.lbl_tpu_status = tk.Label(row1, text=tpu_init_text, font=("arial", 16, "bold"), fg=tpu_init_color, bg="#1a1d20")
 
@@ -1145,7 +1246,8 @@ class MainWindow(tk.Tk):
         for i in range(len(self.water_vars)):
             self.water_vars[i].set(1 if i in active_channels else 0)
         self.send_bitmask("".join(mask))
-        print(f"[Scheduled] Watering started for channels {[c+1 for c in active_channels]} with target {SCHEDULED_TARGET_PCT}%. Dir: {self._scheduled_run_dir}")
+        stop_target = float(self.soil_water_stop_setpoint.get()) if hasattr(self, "soil_water_stop_setpoint") else SCHEDULED_TARGET_PCT
+        print(f"[Scheduled] Watering started for channels {[c+1 for c in active_channels]} with target {stop_target}%. Dir: {self._scheduled_run_dir}")
 
         self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
 
@@ -1165,13 +1267,14 @@ class MainWindow(tk.Tk):
             except Exception as e:
                 print(f"[Scheduled Monitor] Image capture error: {e}")
 
-        # 2. Check per-channel target cutoff (80%)
+        # 2. Check per-channel target cutoff
+        stop_target = float(self.soil_water_stop_setpoint.get()) if hasattr(self, "soil_water_stop_setpoint") else SCHEDULED_TARGET_PCT
         moistures = self.telemetry.get("moisture_pct", [])
         still_active = []
         for ch in self._scheduled_channels_active:
             m = moistures[ch] if ch < len(moistures) else None
-            if m is not None and m >= SCHEDULED_TARGET_PCT:
-                print(f"[Scheduled] Channel S{ch+1} reached {m:.1f}% >= target ({SCHEDULED_TARGET_PCT}%). Turning OFF pump.")
+            if m is not None and m >= stop_target:
+                print(f"[Scheduled] Channel S{ch+1} reached {m:.1f}% >= target ({stop_target}%). Turning OFF pump.")
             else:
                 still_active.append(ch)
 
@@ -1227,7 +1330,7 @@ class MainWindow(tk.Tk):
             self.water_vars.append(var)
             btn = tk.Checkbutton(
                 self.water_frame, text=f"W{i+1}", font=("arial", 22, "bold"), bg="white",
-                fg="black", activeforeground="black", disabledforeground="black",
+                fg="black", activeforeground="black", disabledforeground="#9e9e9e",
                 selectcolor="#1e88e5", indicatoron=False, variable=var, bd=3, state=state,
                 command=self._send_manual_relays
             )
@@ -1237,9 +1340,21 @@ class MainWindow(tk.Tk):
     def _on_auto_toggle(self) -> None:
         is_auto = bool(self.auto_var.get())
         self.ckb_auto.config(text="AUTO" if is_auto else "MANUAL")
+        if is_auto:
+            self.ckb_auto.grid()
+            self.btn_manual_mode.grid_remove()
+            self.btn_manual_mode.config(state=tk.DISABLED)
+            self.off_row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(2, 1))
+            self.on_row.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(1, 2))
+        else:
+            self.ckb_auto.grid_remove()
+            self.off_row.pack_forget()
+            self.on_row.pack_forget()
+            self.btn_manual_mode.config(state=tk.NORMAL)
+            self.btn_manual_mode.grid()
         state = tk.DISABLED if is_auto else tk.NORMAL
         for b in self.water_btns:
-            b.config(state=state, disabledforeground="black")
+            b.config(state=state, disabledforeground="#9e9e9e")
         if not is_auto:
             self._send_manual_relays()
 
@@ -1354,7 +1469,7 @@ class MainWindow(tk.Tk):
         self.lbl_soil_temp.config(text=f"Soil: {st:.1f}°C" if st is not None else "Soil: N/A")
         self.lbl_air_temp.config(text=f"Air: {at:.1f}°C" if at is not None else "Air: N/A")
         self.lbl_air_humi.config(text=f"RH: {ah:.1f}%" if ah is not None else "RH: N/A")
-        self.lbl_light.config(text=f"Light: {lv}" if lv is not None else "Light: N/A")
+        self.lbl_light.config(text=f"Light: {lv} lux" if lv is not None else "Light: N/A")
 
         moist_strs = [f"S{i+1}: {m:.1f}%" if m is not None else f"S{i+1}: --" for i, m in enumerate(moist)]
         self.lbl_soil_moist.config(text="  |  ".join(moist_strs) if moist_strs else "No sensors")
@@ -1422,15 +1537,19 @@ class MainWindow(tk.Tk):
         if not (pai or hmap):
             return frame, None
 
-        results, latency = self.plant_ai.detect_and_analyze(frame)
         if pai and not hmap:
+            # AI only: run TPU inference, draw bbox + health labels
+            results, latency = self.plant_ai.detect_and_analyze(frame)
             out = self.plant_ai.draw_overlay(frame, results, latency, show_bbox=True)
         elif not pai and hmap:
-            out = self.plant_ai.draw_heatmap_overlay(frame, results, latency)
+            # Heatmap only: full-frame HSV colormap, no TPU needed
+            out = self.plant_ai.draw_full_frame_heatmap(frame)
+            latency = 0.0
         else:
-            # Both ON: heatmap colormap overlay on plant pixels + health badges (no bbox rectangles)
-            hmap_frame = self.plant_ai.draw_heatmap_overlay(frame, results, latency)
-            out = self.plant_ai.draw_overlay(hmap_frame, results, latency, show_bbox=False)
+            # Both ON: no interaction. AI shows bboxes, heatmap overlays entire frame with dimmed background
+            results, latency = self.plant_ai.detect_and_analyze(frame)
+            hmap_frame = self.plant_ai.draw_full_frame_heatmap(frame, latency_ms=latency, show_hud=False)
+            out = self.plant_ai.draw_overlay(hmap_frame, results, latency, show_bbox=True)
 
         return out, latency
 
@@ -1470,15 +1589,48 @@ class MainWindow(tk.Tk):
         self.after(500, self._auto_loop)
 
     def display_image(self, img: np.ndarray | Image.Image) -> None:
+        self._last_display_img = img
+        c_w = self.canvas.winfo_width()
+        c_h = self.canvas.winfo_height()
+
         if isinstance(img, np.ndarray):
-            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.ndim == 3 and img.shape[2] == 3 else img
-            pil_img = Image.fromarray(rgb)
+            img_h, img_w = img.shape[:2]
         else:
-            pil_img = img
+            img_w, img_h = img.size
+
+        if c_w > 10 and c_h > 10 and img_w > 0 and img_h > 0:
+            scale = min(c_w / img_w, c_h / img_h)
+            new_w = max(1, int(img_w * scale))
+            new_h = max(1, int(img_h * scale))
+            if isinstance(img, np.ndarray):
+                resized = cv2.resize(
+                    img, (new_w, new_h),
+                    interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+                )
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB) if resized.ndim == 3 and resized.shape[2] == 3 else resized
+                pil_img = Image.fromarray(rgb)
+            else:
+                pil_img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            pos_x = c_w // 2
+            pos_y = c_h // 2
+            anchor = "center"
+        else:
+            if isinstance(img, np.ndarray):
+                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.ndim == 3 and img.shape[2] == 3 else img
+                pil_img = Image.fromarray(rgb)
+            else:
+                pil_img = img
+            pos_x = 0
+            pos_y = 0
+            anchor = "nw"
+
         self.photo_ref = ImageTk.PhotoImage(pil_img)
         self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo_ref)
-        self.canvas.config(scrollregion=(0, 0, pil_img.width, pil_img.height))
+        self.canvas.create_image(pos_x, pos_y, anchor=anchor, image=self.photo_ref)
+
+    def _on_canvas_resize(self, event=None) -> None:
+        if getattr(self, "_last_display_img", None) is not None and not getattr(self, "_is_closing", False):
+            self.display_image(self._last_display_img)
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)

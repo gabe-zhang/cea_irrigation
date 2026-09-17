@@ -22,9 +22,9 @@ from PIL import Image
 import gui.psc_irr_gui as psc_mod
 from gui.psc_irr_gui import MainWindow, TELEMETRY_DIR
 
-ARTIFACT_DIR = Path("/home/pi50/.gemini/antigravity-ide/brain/b32fd666-4997-417f-936f-b62b6a8709c9")
+ARTIFACT_DIR = Path("/home/pi50/.gemini/antigravity-ide/brain/fa3253c6-77af-4176-a3e6-eedefd18f949")
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-SAMPLE_IMG = Path("tests/samples/potted_plant_greenhouse.jpg")
+SAMPLE_IMG = Path("tests/samples/20260909_172410_497.jpg")
 
 
 def capture_window_crop(win: tk.Tk | tk.Toplevel, out_path: Path) -> None:
