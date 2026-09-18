@@ -435,7 +435,7 @@ class PlotWindow:
 
     def _init_live_figure(self) -> None:
         self.fig.clf()
-        self.fig.suptitle("Environmental telemetry and soil moisture (Last 60 sec)", fontsize=24, fontweight="bold")
+        self.fig.suptitle("Environmental Telemetry and Soil Moisture (Last 60 sec)", fontsize=24, fontweight="bold")
 
         # Top Plot: Air temp & Soil temp (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
         self.ax_temp = self.fig.add_subplot(2, 1, 1)
@@ -510,17 +510,17 @@ class PlotWindow:
             ax.axis("off")
             today_str = datetime.now().strftime("%Y-%m-%d")
             if mode == "day":
-                self.fig.suptitle(f"Environmental telemetry and soil moisture (Day \u2014 {today_str})", fontsize=24, fontweight="bold")
+                self.fig.suptitle(f"Environmental Telemetry and Soil Moisture (Day \u2014 {today_str})", fontsize=24, fontweight="bold")
             else:
-                self.fig.suptitle(f"Environmental telemetry and soil moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
+                self.fig.suptitle(f"Environmental Telemetry and Soil Moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
             self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
             return
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         if mode == "day":
-            self.fig.suptitle(f"Environmental telemetry and soil moisture (Day \u2014 {today_str})", fontsize=24, fontweight="bold")
+            self.fig.suptitle(f"Environmental Telemetry and Soil Moisture (Day \u2014 {today_str})", fontsize=24, fontweight="bold")
         else:
-            self.fig.suptitle(f"Environmental telemetry and soil moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
+            self.fig.suptitle(f"Environmental Telemetry and Soil Moisture ({mode.capitalize()})", fontsize=24, fontweight="bold")
 
         # Top Plot: Air temp & Soil temp (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
         ax_temp = self.fig.add_subplot(2, 1, 1)
@@ -1149,8 +1149,8 @@ class MainWindow(tk.Tk):
         row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(6, 0))
         tk.Label(row1, text="ENV:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
 
-        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 16, "bold"), fg="#06d6a0", bg="#1a1d20")
-        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 16, "bold"), fg="#ffd166", bg="#1a1d20")
+        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 16, "bold"), fg="#ffffff", bg="#1a1d20")
+        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 16, "bold"), fg="#06d6a0", bg="#1a1d20")
         self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 16, "bold"), fg="#4cc9f0", bg="#1a1d20")
         self.lbl_light = tk.Label(row1, text="Light: -- lux", font=("arial", 16, "bold"), fg="#f72585", bg="#1a1d20")
         
@@ -1163,7 +1163,7 @@ class MainWindow(tk.Tk):
 
         row2 = tk.Frame(bar, bg="#1a1d20")
         row2.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(2, 6))
-        tk.Label(row2, text="MOIST:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(row2, text="Soil moisture:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
         self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=("arial", 16, "bold"), fg="#ffffff", bg="#1a1d20")
         self.lbl_soil_moist.pack(side=tk.LEFT, padx=10)
 
