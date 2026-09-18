@@ -21,3 +21,4 @@ assets/
 runs/
 tests/yolo_runs/
 scripts/**slide**
+scripts/dev/

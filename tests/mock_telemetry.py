@@ -1,20 +1,11 @@
-#!/usr/bin/env python3
-"""Generate synthetic telemetry CSV dataset with a 10:00 AM watering scenario.
-
-This script creates realistic 24-hour telemetry logs matching the schema used by
-the CEA Irrigation Controller. At 10:00 AM, soil moisture drops below the 40%
-setpoint, triggering pumps 1 and 2 (500 L/h flow rate) for 90 seconds (12.5 L each)
-until soil moisture reaches the 80% target cutoff.
-"""
+"""Mock telemetry data generator for unit and integration testing."""
 
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timedelta
 import math
 from pathlib import Path
 import random
-
 
 HEADER = (
     "timestamp,soil1_raw,soil2_raw,soil3_raw,soil4_raw,"
@@ -125,39 +116,3 @@ def generate_mock_data(target_date: datetime.date, output_dir: Path) -> Path:
         f.writelines(rows)
 
     return out_file
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate mock CEA telemetry dataset with 10:00 AM watering event."
-    )
-    parser.add_argument(
-        "--date",
-        type=str,
-        default=None,
-        help="Target date in YYYY-MM-DD format (default: today)",
-    )
-    parser.add_argument(
-        "--outdir",
-        type=str,
-        default="Data/telemetry",
-        help="Target directory for telemetry CSV files (default: Data/telemetry)",
-    )
-    args = parser.parse_args()
-
-    if args.date:
-        target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
-    else:
-        target_date = datetime.now().date()
-
-    out_path = generate_mock_data(target_date, Path(args.outdir))
-    print(f"[Mock Generator] Successfully generated mock telemetry dataset:")
-    print(f"  File: {out_path}")
-    print(f"  Date: {target_date.isoformat()}")
-    print(f"  Event: 10:00 AM watering event")
-    print(f"         Pumps 1 & 2 active for 90s (~12.5 L each at 500 L/h)")
-    print(f"         Moisture: drops <40% (37.0%) -> rises to 80.0% target cutoff")
-
-
-if __name__ == "__main__":
-    main()

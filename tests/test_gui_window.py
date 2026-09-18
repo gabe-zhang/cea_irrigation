@@ -267,7 +267,7 @@ def test_mainwindow_both_plant_ai_and_heatmap_overlays(headless_app):
 
 
 def test_read_historical_telemetry_flow_rate_and_events(tmp_path):
-    from scripts.generate_mock_watering import generate_mock_data
+    from tests.mock_telemetry import generate_mock_data
     from datetime import date, datetime
 
     today = date(2026, 9, 11)
@@ -313,7 +313,7 @@ def test_plot_window_threshold_lines_and_dynamic_setpoint(headless_app):
 
 
 def test_plot_window_historical_water_volume_axis_and_bars(headless_app, tmp_path, monkeypatch):
-    from scripts.generate_mock_watering import generate_mock_data
+    from tests.mock_telemetry import generate_mock_data
     from datetime import date, datetime
 
     monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
