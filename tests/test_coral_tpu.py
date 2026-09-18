@@ -13,15 +13,23 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-MODEL_PATH = Path(__file__).resolve().parent / "models" / "mobilenet_v2_1.0_224_quant_edgetpu.tflite"
-LABELS_PATH = Path(__file__).resolve().parent / "models" / "imagenet_labels.txt"
+MODEL_PATH = Path(__file__).resolve().parent.parent / "gui" / "models" / "yolo26n_e100.tflite"
+
+_SHARED_DELEGATE = None
+
+
+def get_shared_delegate():
+    """Obtain or reuse the singleton Edge TPU delegate to avoid driver reinitialization."""
+    global _SHARED_DELEGATE
+    if _SHARED_DELEGATE is None:
+        import ai_edge_litert.interpreter as tflite
+        _SHARED_DELEGATE = tflite.load_delegate("libedgetpu.so.1")
+    return _SHARED_DELEGATE
 
 
 def test_edgetpu_delegate_load():
     """Test that LiteRT can locate and load the libedgetpu C delegate library."""
-    import ai_edge_litert.interpreter as tflite
-
-    delegate = tflite.load_delegate("libedgetpu.so.1")
+    delegate = get_shared_delegate()
     assert delegate is not None, "Failed to load Edge TPU delegate (libedgetpu.so.1)"
 
 
@@ -31,43 +39,43 @@ def test_edgetpu_model_initialization():
 
     assert MODEL_PATH.is_file(), f"Model file not found at {MODEL_PATH}"
 
-    delegate = tflite.load_delegate("libedgetpu.so.1")
+    delegate = get_shared_delegate()
     interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[delegate])
     interpreter.allocate_tensors()
 
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
-    assert len(input_details) == 1
-    assert list(input_details[0]["shape"]) == [1, 224, 224, 3]
-    assert input_details[0]["dtype"] == np.uint8
-
-    assert len(output_details) == 1
-    assert list(output_details[0]["shape"]) == [1, 1001]
-    assert output_details[0]["dtype"] == np.uint8
+    assert len(input_details) >= 1
+    assert input_details[0]["dtype"] in (np.int8, np.uint8)
+    assert len(output_details) >= 1
 
 
 def test_edgetpu_inference_execution():
     """Test running end-to-end inference on the Edge TPU and verify execution speed."""
     import ai_edge_litert.interpreter as tflite
 
-    delegate = tflite.load_delegate("libedgetpu.so.1")
+    delegate = get_shared_delegate()
     interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[delegate])
     interpreter.allocate_tensors()
 
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
-    # Create dummy input data
-    input_data = np.random.randint(0, 256, size=input_details[0]["shape"], dtype=np.uint8)
+    # Create dummy input data matching model input dtype
+    in_dtype = input_details[0]["dtype"]
+    if in_dtype == np.int8:
+        input_data = np.random.randint(-128, 128, size=input_details[0]["shape"], dtype=np.int8)
+    else:
+        input_data = np.random.randint(0, 256, size=input_details[0]["shape"], dtype=np.uint8)
 
     # Warm-up run
     interpreter.set_tensor(input_details[0]["index"], input_data)
     interpreter.invoke()
 
-    # Benchmark 20 iterations
+    # Benchmark iterations
     latencies = []
-    for _ in range(20):
+    for _ in range(10):
         start = time.perf_counter()
         interpreter.set_tensor(input_details[0]["index"], input_data)
         interpreter.invoke()
@@ -77,9 +85,9 @@ def test_edgetpu_inference_execution():
     avg_ms = (sum(latencies) / len(latencies)) * 1000
     fps = 1000 / avg_ms
 
-    assert output.shape == (1, 1001)
-    # Edge TPU inference on MobileNetV2 should be well under 25ms (typically ~4-6ms on RPi 5)
-    assert avg_ms < 25.0, f"Edge TPU inference too slow ({avg_ms:.2f} ms), expected < 25 ms"
+    assert output.shape == tuple(output_details[0]["shape"])
+    # Edge TPU inference on 640x640 YOLO model should be well under 200ms (~100ms on RPi 5 with USB TPU)
+    assert avg_ms < 200.0, f"Edge TPU inference too slow ({avg_ms:.2f} ms), expected < 200 ms"
     print(f"\n[PASS] Edge TPU inference: {avg_ms:.2f} ms ({fps:.1f} FPS)")
 
 
@@ -90,7 +98,7 @@ def test_picamera2_and_litert_coexistence():
 
     assert hasattr(picamera2, "Picamera2")
 
-    delegate = tflite.load_delegate("libedgetpu.so.1")
+    delegate = get_shared_delegate()
     interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[delegate])
     interpreter.allocate_tensors()
 

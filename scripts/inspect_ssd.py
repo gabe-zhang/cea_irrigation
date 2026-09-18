@@ -2,7 +2,7 @@ import sys
 import ai_edge_litert.interpreter as tflite
 from pathlib import Path
 
-model_path = Path(__file__).resolve().parent.parent / "gui" / "models" / "ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite"
+model_path = Path(__file__).resolve().parent.parent / "gui" / "models" / "yolo26n_e100.tflite"
 print(f"Model path: {model_path} (exists: {model_path.exists()})", flush=True)
 
 try:
