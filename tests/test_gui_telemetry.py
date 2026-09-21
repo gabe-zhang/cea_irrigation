@@ -221,40 +221,39 @@ def test_log_telemetry_csv(tmp_path, monkeypatch):
     with patch("gui.psc_irr_gui.Camera"):
         with patch.object(psc_mod.MainWindow, "_init_serial"):
             with patch.object(psc_mod.MainWindow, "_camera_loop"):
-                with patch.object(psc_mod.MainWindow, "_auto_loop"):
-                    app = psc_mod.MainWindow()
-                    app.withdraw()
+                app = psc_mod.MainWindow()
+                app.withdraw()
 
-                    data = {
-                        "soil": [450, 430, None, None],
-                        "soil_temp": 21.5,
-                        "temp": 24.2,
-                        "humidity": 55.0,
-                        "light": 100,
-                        "relays": "1000",
-                        "pan": 65,
-                        "tilt": 60,
-                    }
-                    moist = [15.2, 22.4, None, None]
+                data = {
+                    "soil": [450, 430, None, None],
+                    "soil_temp": 21.5,
+                    "temp": 24.2,
+                    "humidity": 55.0,
+                    "light": 100,
+                    "relays": "1000",
+                    "pan": 65,
+                    "tilt": 60,
+                }
+                moist = [15.2, 22.4, None, None]
 
-                    # First log creates file and header
-                    app._log_telemetry_csv(data, moist)
+                # First log creates file and header
+                app._log_telemetry_csv(data, moist)
 
-                    today_str = datetime.now().strftime("%Y%m%d")
-                    csv_file = tmp_path / "telemetry" / f"telemetry_{today_str}.csv"
-                    assert csv_file.exists()
+                today_str = datetime.now().strftime("%Y%m%d")
+                csv_file = tmp_path / "telemetry" / f"telemetry_{today_str}.csv"
+                assert csv_file.exists()
 
-                    lines = csv_file.read_text(encoding="utf-8").strip().split("\n")
-                    assert len(lines) == 2
-                    assert lines[0].startswith("timestamp,soil1_raw")
-                    assert "450,430,null,null,15.2,22.4,null,null,21.5,24.2,55.0,100,1000,65,60" in lines[1]
+                lines = csv_file.read_text(encoding="utf-8").strip().split("\n")
+                assert len(lines) == 2
+                assert lines[0].startswith("timestamp,soil1_raw")
+                assert "450,430,null,null,15.2,22.4,null,null,21.5,24.2,55.0,100,1000,65,60" in lines[1]
 
-                    # Second log appends row without re-writing header
-                    app._log_telemetry_csv(data, moist)
-                    lines_after = csv_file.read_text(encoding="utf-8").strip().split("\n")
-                    assert len(lines_after) == 3
+                # Second log appends row without re-writing header
+                app._log_telemetry_csv(data, moist)
+                lines_after = csv_file.read_text(encoding="utf-8").strip().split("\n")
+                assert len(lines_after) == 3
 
-                    app.destroy()
+                app.destroy()
 
 
 # --- Gimbal and Safety Bounds Tests ---
@@ -273,37 +272,37 @@ def test_gimbal_nudging():
     with patch("gui.psc_irr_gui.Camera"):
         with patch.object(psc_mod.MainWindow, "_init_serial"):
             with patch.object(psc_mod.MainWindow, "_camera_loop"):
-                with patch.object(psc_mod.MainWindow, "_auto_loop"):
-                    app = psc_mod.MainWindow()
-                    app.withdraw()
-                    app.ser = MagicMock()
-                    app.ser.is_open = True
+                app = psc_mod.MainWindow()
+                app.withdraw()
+                app.ser = MagicMock()
+                app.ser.is_open = True
 
-                    # Pan limits
-                    app._last_servo_cmd = 0.0
-                    app.current_pan = 129
-                    app.nudge_pan(5)  # should cap at PAN_MAX (130)
-                    assert app.current_pan == 130
-                    app.ser.write.assert_called_with(b"p 130\n")
+                # Pan limits
+                app._last_servo_cmd = 0.0
+                app.current_pan = 129
+                app.nudge_pan(5)  # should cap at PAN_MAX (130)
+                assert app.current_pan == 130
+                app.ser.write.assert_called_with(b"p 130\n")
 
-                    app._last_servo_cmd = 0.0
-                    app.current_pan = 1
-                    app.nudge_pan(-5)  # should cap at PAN_MIN (0)
-                    assert app.current_pan == 0
-                    app.ser.write.assert_called_with(b"p 0\n")
+                app._last_servo_cmd = 0.0
+                app.current_pan = 1
+                app.nudge_pan(-5)  # should cap at PAN_MIN (0)
+                assert app.current_pan == 0
+                app.ser.write.assert_called_with(b"p 0\n")
 
-                    # Tilt limits
-                    app._last_servo_cmd = 0.0
-                    app.current_tilt = 58
-                    app.nudge_tilt(10)  # should cap at TILT_MAX (60)
-                    assert app.current_tilt == 60
-                    app.ser.write.assert_called_with(b"t 60\n")
+                # Tilt limits
+                app._last_servo_cmd = 0.0
+                app.current_tilt = 58
+                app.nudge_tilt(10)  # should cap at TILT_MAX (60)
+                assert app.current_tilt == 60
+                app.ser.write.assert_called_with(b"t 60\n")
 
-                    # Home
-                    app._last_servo_cmd = 0.0
-                    app.home_gimbal()
-                    assert app.current_pan == PAN_HOME
-                    assert app.current_tilt == TILT_HOME
-                    app.ser.write.assert_called_with(b"h\n")
+                # Home
+                app._last_servo_cmd = 0.0
+                app.home_gimbal()
+                assert app.current_pan == PAN_HOME
+                assert app.current_tilt == TILT_HOME
+                app.ser.write.assert_called_with(b"h\n")
 
-                    app.destroy()
+                app.destroy()
+

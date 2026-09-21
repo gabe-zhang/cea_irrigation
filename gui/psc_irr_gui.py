@@ -51,7 +51,7 @@ except (ImportError, ModuleNotFoundError):
 
 # Constants & Soil Calibration
 BAUDRATE = 9600
-SOIL_WATER_SETPOINT = 40.0  # Trigger pump below this moisture % in AUTO mode
+SOIL_WATER_SETPOINT = 40.0  # 10am scheduled check starts watering below this moisture %
 SCHEDULED_TARGET_PCT = 80.0  # Scheduled irrigation shuts off when channel reaches 80%
 SCHEDULED_MAX_WATERING_SEC = 180  # 3-minute hard safety timeout
 PUMP_FLOW_RATE_LPH = 500.0  # Pump flow rate: 500 L/Hour
@@ -879,7 +879,6 @@ class MainWindow(tk.Tk):
 
         self._init_serial()
         self._camera_loop()
-        self._auto_loop()
         self._start_periodic_loggers()
         self._start_scheduled_ticker()
 
@@ -1372,12 +1371,12 @@ class MainWindow(tk.Tk):
         ai_active = bool(self.plant_ai_var.get() or self.heatmap_var.get())
         if ai_active:
             if self.plant_ai.is_available:
-                self.lbl_tpu_status.config(text=f"TPU: Active ({self.plant_ai.last_latency_ms:.1f} ms)", fg="#06d6a0")
+                self.lbl_tpu_status.config(text=f"AI: Active ({self.plant_ai.last_latency_ms:.1f} ms)", fg="#06d6a0")
             else:
                 self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
         else:
             if self.plant_ai.is_available:
-                self.lbl_tpu_status.config(text="TPU: Ready", fg="#06d6a0")
+                self.lbl_tpu_status.config(text="AI: Ready", fg="#06d6a0")
             else:
                 self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
 
@@ -1560,7 +1559,7 @@ class MainWindow(tk.Tk):
                 display_frame, latency = self._apply_plant_ai_overlays(frame)
                 if latency is not None:
                     if self.plant_ai.is_available:
-                        self.lbl_tpu_status.config(text=f"TPU: Active ({latency:.1f} ms)", fg="#06d6a0")
+                        self.lbl_tpu_status.config(text=f"AI: Active ({latency:.1f} ms)", fg="#06d6a0")
                     else:
                         self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
                 self.display_image(display_frame)
@@ -1571,22 +1570,6 @@ class MainWindow(tk.Tk):
                     print(f"[Capture] Saved clean snapshot to {out}")
                     self.flag_capture = False
         self.after(30, self._camera_loop)
-
-    def _auto_loop(self) -> None:
-        if self.auto_var.get():
-            moistures = self.telemetry.get("moisture_pct", [])
-            setpoint = float(self.soil_water_setpoint.get())
-            mask, changed = [], False
-            for i in range(min(len(moistures), len(self.water_vars))):
-                m = moistures[i]
-                des = 1 if (m is not None and m < setpoint) else 0
-                if self.water_vars[i].get() != des:
-                    self.water_vars[i].set(des)
-                    changed = True
-                mask.append(str(des))
-            if changed and mask:
-                self.send_bitmask("".join(mask))
-        self.after(500, self._auto_loop)
 
     def display_image(self, img: np.ndarray | Image.Image) -> None:
         self._last_display_img = img
@@ -1649,7 +1632,7 @@ class MainWindow(tk.Tk):
                 display_frame, latency = self._apply_plant_ai_overlays(img)
                 if latency is not None:
                     if self.plant_ai.is_available:
-                        self.lbl_tpu_status.config(text=f"TPU: Active ({latency:.1f} ms)", fg="#06d6a0")
+                        self.lbl_tpu_status.config(text=f"AI: Active ({latency:.1f} ms)", fg="#06d6a0")
                     else:
                         self.lbl_tpu_status.config(text="TPU: Disconnected", fg="#e63946")
                 self.display_image(display_frame)

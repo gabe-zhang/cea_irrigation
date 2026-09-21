@@ -15,8 +15,7 @@ def headless_app():
     with patch("gui.psc_irr_gui.Camera"):
         with patch.object(MainWindow, "_init_serial"):
             with patch.object(MainWindow, "_camera_loop"):
-                with patch.object(MainWindow, "_auto_loop"):
-                    app = MainWindow()
+                app = MainWindow()
     app.withdraw()
     yield app
     try:
@@ -103,25 +102,6 @@ def test_mainwindow_manual_relays_send(headless_app):
 
     app._send_manual_relays()
     app.ser.write.assert_called_with(b"1010\n")
-
-
-def test_mainwindow_auto_loop_decision(headless_app):
-    app = headless_app
-    app.ser = MagicMock()
-    app.ser.is_open = True
-
-    app.auto_var.set(1)
-    # Channel 0: 30% (< 40 -> 1)
-    # Channel 1: 50% (>= 40 -> 0)
-    # Channel 2: None (disconnected -> safe 0)
-    # Channel 3: 20% (< 40 -> 1)
-    app.telemetry["moisture_pct"] = [30.0, 50.0, None, 20.0]
-
-    with patch.object(app, "after") as mock_after:
-        app._auto_loop()
-        assert [v.get() for v in app.water_vars] == [1, 0, 0, 1]
-        app.ser.write.assert_called_with(b"1001\n")
-        mock_after.assert_called_with(500, app._auto_loop)
 
 
 def test_mainwindow_repeat_mechanism(headless_app):

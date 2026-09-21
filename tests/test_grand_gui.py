@@ -157,46 +157,15 @@ def headless_gui():
     with patch("gui.psc_irr_gui.Camera"):
         with patch.object(MainWindow, "_init_serial"):
             with patch.object(MainWindow, "_camera_loop"):
-                with patch.object(MainWindow, "_auto_loop"):
-                    with patch.object(MainWindow, "_start_periodic_loggers"):
-                        with patch.object(MainWindow, "_start_scheduled_ticker"):
-                            app = MainWindow()
+                with patch.object(MainWindow, "_start_periodic_loggers"):
+                    with patch.object(MainWindow, "_start_scheduled_ticker"):
+                        app = MainWindow()
     app.withdraw()
     yield app
     try:
         app.destroy()
     except Exception:
         pass
-
-
-def test_dynamic_setpoint_spinbox_and_autoloop(headless_gui):
-    app = headless_gui
-    app.ser = MagicMock()
-    app.ser.is_open = True
-
-    # Default setpoint is 40.0
-    assert app.soil_water_setpoint.get() == 40.0
-
-    # Moisture: S1=35% (<40), S2=50% (>=40), S3=None (safe 0), S4=38% (<40)
-    app.telemetry["moisture_pct"] = [35.0, 50.0, None, 38.0]
-    with patch.object(app, "after") as mock_after:
-        app._auto_loop()
-        assert [v.get() for v in app.water_vars] == [1, 0, 0, 1]
-        app.ser.write.assert_called_with(b"1001\n")
-
-    # Change setpoint dynamically to 60.0% -> S2 (50%) is now below setpoint and should turn ON!
-    app.soil_water_setpoint.set(60.0)
-    with patch.object(app, "after"):
-        app._auto_loop()
-        assert [v.get() for v in app.water_vars] == [1, 1, 0, 1]
-        app.ser.write.assert_called_with(b"1101\n")
-
-    # Change setpoint dynamically to 30.0% -> all are >= 30.0%, all pumps should turn OFF!
-    app.soil_water_setpoint.set(30.0)
-    with patch.object(app, "after"):
-        app._auto_loop()
-        assert [v.get() for v in app.water_vars] == [0, 0, 0, 0]
-        app.ser.write.assert_called_with(b"0000\n")
 
 
 # --- 4. Periodic Data & Image Loggers ---
