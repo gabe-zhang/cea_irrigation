@@ -87,7 +87,7 @@ def analyze_crop_health(crop: np.ndarray) -> tuple[str, float, float, float, flo
     healthy_mask = (s >= 35) & (v >= 35) & (h >= 32) & (h <= 88)
     yellow_mask = (s >= 35) & (v >= 35) & (h >= 18) & (h < 32)
     brown_mask = (s >= 50) & (v >= 35) & ((h < 18) | (h >= 165))
-    foliage_mask = healthy_mask | yellow_mask | brown_mask
+    foliage_mask = healthy_mask | yellow_mask
     n_plant = int(np.count_nonzero(foliage_mask))
 
     if n_plant < 30:
@@ -141,7 +141,7 @@ class PlantAIDetector:
         self.last_latency_ms = 0.0
 
         base_dir = Path(__file__).resolve().parent.parent
-        yolo_model = base_dir / "models" / "yolo26n_e100.tflite"
+        yolo_model = base_dir / "models" / "yolo26n_exp2.tflite"
 
         if model_path:
             self.model_path = Path(model_path)

@@ -47,7 +47,7 @@ cea_irrigation/
 │   ├── hardware_tests/      # Per-sensor Arduino test sketches
 │   └── libraries/           # Arduino C++ libraries (DHT, OneWire, DFRobot_VEML7700)
 ├── gui/                     # Desktop GUI application & vision modules
-│   └── models/              # TFLite model (yolo26n_e100.tflite)
+│   └── models/              # TFLite model
 ├── scripts/                 # CLI controller
 ├── tests/                   # pytest suite
 ├── docs/                    # Diagrams for README
@@ -108,7 +108,6 @@ Flash the production firmware to your Arduino:
 Hardware test sketches are available in `firmware/hardware_tests/` for validating each sensor individually.
 
 ---
-
 
 ## Troubleshooting
 

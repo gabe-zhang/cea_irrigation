@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-MODEL_PATH = Path(__file__).resolve().parent.parent / "gui" / "models" / "yolo26n_e100.tflite"
+MODEL_PATH = Path(__file__).resolve().parent.parent / "gui" / "models" / "yolo26n_exp2.tflite"
 
 _SHARED_DELEGATE = None
 
