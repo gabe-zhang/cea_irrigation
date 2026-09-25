@@ -12,6 +12,7 @@ dependencies = [
     "pyserial>=3.5",
     "numpy>=1.26.0",
     "ai-edge-litert>=2.2.0",
+    "tkcalendar>=1.6.1",
 ]
 
 [project.optional-dependencies]
