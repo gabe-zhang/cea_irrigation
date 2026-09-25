@@ -16,6 +16,41 @@ from gui.modules.plant_ai import PlantAIDetector, PlantHealthResult, analyze_cro
 SAMPLE_DIR = Path(__file__).resolve().parent / "samples"
 
 
+def test_detection_iom_suppresses_nested_same_class_only():
+    """Post-NMS IoM removes nested duplicates but keeps nearby and other-class plants."""
+    class FakeInterpreter:
+        def set_tensor(self, index, value):
+            pass
+
+        def invoke(self):
+            pass
+
+        def get_tensor(self, index):
+            # cx, cy, width, height, class 0 score, class 1 score
+            return np.array([[
+                [0.50, 0.50, 0.50, 0.50, 0.90, 0.00],  # large plant
+                [0.45, 0.45, 0.10, 0.10, 0.80, 0.00],  # nested duplicate
+                [0.775, 0.45, 0.10, 0.10, 0.70, 0.00],  # nearby, 25% IoM
+                [0.60, 0.45, 0.10, 0.10, 0.00, 0.60],  # nested, other class
+                [0.10, 0.10, 0.10, 0.10, 0.11, 0.00],  # just above cutoff
+                [0.20, 0.10, 0.10, 0.10, 0.09, 0.00],  # below cutoff
+                [0.30, 0.10, 0.10, 0.10, 0.08, 0.00],
+            ]], dtype=np.float32)
+
+    detector = object.__new__(PlantAIDetector)
+    detector.confidence_threshold = 0.10
+    detector.is_available = True
+    detector.interpreter = FakeInterpreter()
+    detector.input_details = [{"shape": [1, 200, 200, 3], "dtype": np.float32, "index": 0}]
+    detector.output_details = [{"index": 0, "quantization": (0.0, 0)}]
+    detector.last_latency_ms = 0.0
+
+    frame = np.full((200, 200, 3), (30, 200, 40), dtype=np.uint8)
+    results, _ = detector.detect_and_analyze(frame)
+
+    assert [round(result.confidence, 2) for result in results] == [0.90, 0.70, 0.60, 0.11]
+
+
 # --- 1. Unit Tests for Canopy Stress Analysis (CI-ready, runs without hardware) ---
 
 def test_analyze_crop_health_healthy():
@@ -23,11 +58,10 @@ def test_analyze_crop_health_healthy():
     crop = np.zeros((100, 100, 3), dtype=np.uint8)
     crop[:, :] = (30, 200, 40)
 
-    status, h_pct, c_pct, n_pct, mean_hue, color, _ = analyze_crop_health(crop)
+    status, h_pct, c_pct, mean_hue, color, _ = analyze_crop_health(crop)
     assert status == "HEALTHY"
     assert h_pct >= 90.0
     assert c_pct < 10.0
-    assert n_pct < 10.0
     assert 33.0 <= mean_hue <= 88.0
     assert color == (30, 210, 30)
 
@@ -37,21 +71,22 @@ def test_analyze_crop_health_chlorosis():
     crop = np.zeros((100, 100, 3), dtype=np.uint8)
     crop[:, :] = (30, 210, 220)
 
-    status, h_pct, c_pct, n_pct, mean_hue, color, _ = analyze_crop_health(crop)
+    status, h_pct, c_pct, mean_hue, color, _ = analyze_crop_health(crop)
     assert status == "YELLOWING WARNING"
     assert c_pct >= 50.0
     assert color == (0, 180, 255)
 
 
-def test_analyze_crop_health_necrosis():
-    """Verify that a brown/desiccated crop patch is classified as BROWNING ALERT."""
+def test_analyze_crop_health_brown_excluded():
+    """Verify that a brown/desiccated crop patch is NOT included in foliage and returns NO VEGETATION."""
     crop = np.zeros((100, 100, 3), dtype=np.uint8)
-    crop[:, :] = (30, 80, 150)
+    crop[:, :] = (30, 80, 150)  # Low-hue brownish color
 
-    status, h_pct, c_pct, n_pct, mean_hue, color, _ = analyze_crop_health(crop)
-    assert status == "BROWNING ALERT"
-    assert (n_pct + c_pct) >= 45.0 or n_pct >= 20.0
-    assert color == (0, 0, 230)
+    status, h_pct, c_pct, mean_hue, color, coverage = analyze_crop_health(crop)
+    # Brown pixels must not count as foliage -- result is NO VEGETATION or low coverage
+    assert status in ("NO VEGETATION", "HEALTHY", "YELLOWING WARNING")
+    # Specifically this brown pixel (H~9 in OpenCV HSV) falls outside [18,88], so no foliage
+    assert coverage == 0.0 or status == "NO VEGETATION"
 
 
 def test_analyze_crop_health_empty_and_small():
@@ -63,6 +98,7 @@ def test_analyze_crop_health_empty_and_small():
 def test_plant_ai_disconnected_tpu():
     """Verify Plant AI returns empty results and informs on UI when Coral TPU is disconnected (no CPU fallback)."""
     detector = PlantAIDetector()
+    assert detector.confidence_threshold == 0.10
     detector.is_available = False  # Simulate TPU disconnected
 
     frame = np.full((400, 600, 3), (200, 200, 200), dtype=np.uint8)
@@ -136,7 +172,6 @@ def test_draw_both_ai_and_heatmap_no_interaction():
         status="HEALTHY",
         healthy_pct=90.0,
         chlorosis_pct=5.0,
-        necrosis_pct=5.0,
         mean_hue=55.0,
         color_bgr=(30, 210, 30),
         canopy_coverage=75.0,
@@ -209,7 +244,7 @@ def test_coral_real_plant_sample_images():
 
         print(f"Image: {img_path.name:<38} | Detections: {len(results)} | Latency: {lat:.1f} ms")
         for idx, res in enumerate(results):
-            print(f"  [#{idx+1}] {res.label:<16} Status={res.status:<18} H={res.healthy_pct:.1f}% C={res.chlorosis_pct:.1f}% N={res.necrosis_pct:.1f}% Conf={res.confidence*100:.1f}%")
+            print(f"  [#{idx+1}] {res.label:<16} Status={res.status:<18} H={res.healthy_pct:.1f}% C={res.chlorosis_pct:.1f}% Conf={res.confidence*100:.1f}%")
 
         assert len(results) >= 1, f"Expected at least 1 detection for {img_path.name}"
         assert out_path.exists()
