@@ -1291,14 +1291,14 @@ class MainWindow(tk.Tk):
         self.data_record_frame.grid(row=2, column=1, sticky="nsew", padx=(3, 6), pady=4)
         self.image_record_frame = tk.Frame(self.card_data, bg="white")
         self.image_record_frame.grid(row=3, column=1, sticky="nsew", padx=(3, 6), pady=4)
-        tk.Label(self.data_record_frame, text="Data :", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(
+        tk.Label(self.data_record_frame, text="Data:", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(
             side=tk.LEFT, padx=(4, 2),
         )
         self.data_record_dropdown = tk.OptionMenu(self.data_record_frame, self.data_record_var, "10s", "1min", "1hr")
         self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=4, pady=3)
         self.data_record_dropdown["menu"].config(font=("arial", 15, "bold"))
         self.data_record_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Label(self.image_record_frame, text="Image :", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(
+        tk.Label(self.image_record_frame, text="Image:", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(
             side=tk.LEFT, padx=(4, 2),
         )
         self.image_record_dropdown = tk.OptionMenu(self.image_record_frame, self.image_record_var, "1sec", "1min", "1hr", "1day")
