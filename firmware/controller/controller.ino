@@ -8,6 +8,7 @@
 #include <dht.h>
 #include <Wire.h>
 #include <DFRobot_VEML7700.h>
+#include "PumpSafety.h"
 
 #define BAUDRATE 9600
 
@@ -68,6 +69,20 @@ void checkServoDetach() {
 
 // ── Relay State ──────────────────────────────────────────────────────
 char relayStates[NUM_RELAYS + 1] = "0000";
+PumpSafety pumpSafety[NUM_RELAYS];
+
+void updateRelay(int idx) {
+  digitalWrite(RELAY_PINS[idx], pumpSafety[idx].on ? RELAY_ON : RELAY_OFF);
+  relayStates[idx] = pumpSafety[idx].on ? '1' : '0';
+}
+
+void checkPumpSafety() {
+  uint32_t now = millis();
+  for (int i = 0; i < NUM_RELAYS; i++) {
+    pumpSafety[i].check(now);
+    updateRelay(i);
+  }
+}
 
 // ── DHT22 ────────────────────────────────────────────────────────────
 dht DHT;
@@ -253,22 +268,30 @@ void broadcastTelemetry() {
 
 void applyBitmask(const String& mask) {
   for (unsigned int i = 0; i < mask.length() && i < NUM_RELAYS; i++) {
-    if (mask[i] == '1') {
-      digitalWrite(RELAY_PINS[i], RELAY_ON);
-      relayStates[i] = '1';
-    } else if (mask[i] == '0') {
-      digitalWrite(RELAY_PINS[i], RELAY_OFF);
-      relayStates[i] = '0';
-    }
+    pumpSafety[i].request(mask[i] == '1', millis());
+    updateRelay(i);
   }
   Serial.print("ACK: Relays set to ");
   Serial.println(relayStates);
 }
 
 void handleSerialCommands() {
-  if (Serial.available() <= 0) return;
-
-  String cmd = Serial.readStringUntil('\n');
+  // A missing newline or continuous serial traffic must not block safety checks.
+  static char buffer[32];
+  static byte length = 0;
+  static bool overflow = false;
+  bool complete = false;
+  for (byte consumed = 0; consumed < sizeof(buffer) && Serial.available() > 0; consumed++) {
+    char c = Serial.read();
+    if (c == '\n') { complete = true; break; }
+    if (length < sizeof(buffer) - 1) buffer[length++] = c;
+    else overflow = true;
+  }
+  if (!complete) return;
+  buffer[length] = '\0';
+  String cmd = overflow ? String("") : String(buffer);
+  length = 0;
+  overflow = false;
   cmd.trim();
   if (cmd.length() == 0) return;
 
@@ -337,6 +360,7 @@ void setup() {
 
   delay(500);
   Wire.begin();
+  Wire.setWireTimeout(25000, true); // Bound I2C stalls so relay safety keeps running.
 
   updateDHT();
   updateSoilTemp();
@@ -346,6 +370,7 @@ void setup() {
 }
 
 void loop() {
+  checkPumpSafety();
   updateSoilTemp();
   checkServoDetach();
 
@@ -358,4 +383,5 @@ void loop() {
   }
 
   handleSerialCommands();
+  checkPumpSafety();
 }

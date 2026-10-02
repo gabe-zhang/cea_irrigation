@@ -21,18 +21,60 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import signal
 import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 try:
     from tkcalendar import DateEntry
 except ImportError:
     DateEntry = None
+
+
+if DateEntry is not None:
+    class TouchDateEntry(DateEntry):
+        """DateEntry with reachable popups and larger calendar navigation targets."""
+
+        def __init__(self, master=None, **kwargs):
+            super().__init__(master, **kwargs)
+            # The large adjacent button is the calendar control, so hide the
+            # small DateEntry combobox arrow without changing its date logic.
+            self.style.layout("PeriodDate.TEntry", self.style.layout("TEntry"))
+            self.configure(style="PeriodDate.TEntry", state="readonly")
+            calendar = self._calendar
+            calendar.configure(font=("arial", 16))
+            for button in (calendar._l_month, calendar._r_month, calendar._l_year, calendar._r_year):
+                button.configure(width=3)
+                self.style.configure(button.cget("style"), arrowsize=24, padding=(10, 10))
+                button.pack_configure(ipadx=12, ipady=10)
+
+        def drop_down(self):
+            super().drop_down()
+            if not self._top_cal.winfo_ismapped():
+                return
+            plotter = getattr(self.winfo_toplevel(), "plotter", None)
+            plot_window = getattr(plotter, "window", None)
+            if plot_window is not None and plot_window.winfo_exists():
+                # Raise this popup over the plot without covering other menus.
+                self._top_cal.lift(plot_window)
+            self._top_cal.update_idletasks()
+            width = max(self._top_cal.winfo_width(), self._top_cal.winfo_reqwidth(),
+                        self._calendar.winfo_width(), self._calendar.winfo_reqwidth())
+            height = max(self._top_cal.winfo_height(), self._top_cal.winfo_reqheight())
+            main = self.winfo_toplevel()
+            left = max(0, main.winfo_rootx())
+            right = min(self.winfo_screenwidth(), main.winfo_rootx() + main.winfo_width())
+            x = max(left, min(self.winfo_rootx(), right - width))
+            y = self.winfo_rooty() + self.winfo_height()
+            if y + height > self.winfo_screenheight():
+                y = self.winfo_rooty() - height
+            self._top_cal.geometry(f"+{x}+{max(0, y)}")
+else:
+    TouchDateEntry = None
 
 import cv2
 import matplotlib
@@ -57,7 +99,7 @@ except (ImportError, ModuleNotFoundError):
 BAUDRATE = 9600
 SOIL_WATER_SETPOINT = 40.0  # 10am scheduled check starts watering below this moisture %
 SCHEDULED_TARGET_PCT = 80.0  # Scheduled irrigation shuts off when channel reaches 80%
-SCHEDULED_MAX_WATERING_SEC = 180  # 3-minute hard safety timeout
+SCHEDULED_MAX_WATERING_SEC = 60  # hard safety timeout
 PUMP_FLOW_RATE_LPH = 500.0  # Pump flow rate: 500 L/Hour
 PUMP_FLOW_RATE_LPS = PUMP_FLOW_RATE_LPH / 3600.0  # ~0.13889 Liters/Second
 DRY_BASELINES = [432.0, 408.0, 427.0, 424.0]
@@ -224,13 +266,10 @@ def read_historical_telemetry(
     telemetry_dir: Path,
     range_mode: str,
     now: datetime | None = None,
-    start_date: "datetime.date | None" = None,
-    end_date: "datetime.date | None" = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> dict:
-    """Read telemetry CSV records from telemetry_dir matching range_mode ('day').
-
-    When range_mode is 'day', start_date/end_date (datetime.date objects) define the
-    inclusive date range. Defaults to today only when not specified.
+    """Read telemetry CSV records for a live-relative or inclusive calendar range.
 
     Returns:
         dict with keys: 'timestamps', 'moisture', 'soil_temp', 'air_temp', 'humidity', 'pump_volumes', 'pump_events'
@@ -240,16 +279,21 @@ def read_historical_telemetry(
 
     mode = range_mode.strip().lower()
     if mode == "day":
-        # Use caller-supplied date range or default to today
-        if start_date is None:
-            start_date = now.date()
-        if end_date is None:
-            end_date = now.date()
+        cutoff = datetime.combine(now.date(), datetime.min.time())
+        end_cutoff = datetime.combine(now.date(), datetime.max.time())
+    elif mode == "week":
+        cutoff, end_cutoff = now - timedelta(days=7), now
+    elif mode == "month":
+        cutoff, end_cutoff = now - timedelta(days=30), now
+    elif mode == "period":
+        start_date = start_date or now.date()
+        end_date = end_date or now.date()
+        if start_date > end_date:
+            raise ValueError("Period start date must not be after end date")
         cutoff = datetime.combine(start_date, datetime.min.time())
-        end_cutoff = datetime.combine(end_date, datetime.max.time().replace(microsecond=0))
+        end_cutoff = datetime.combine(end_date, datetime.max.time())
     else:
-        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_cutoff = None
+        raise ValueError(f"Unknown telemetry range: {range_mode}")
 
     timestamps: list[datetime] = []
     moistures: list[list[float | None]] = [[], [], [], []]
@@ -389,9 +433,8 @@ class PlotWindow:
         self.range_var = range_var or tk.StringVar(value="min")
         self.setpoint_var = setpoint_var or getattr(master, "soil_water_setpoint", None)
         self.stop_setpoint_var = stop_setpoint_var or getattr(master, "soil_water_stop_setpoint", None)
-        # Date-range pickers (DateEntry widgets stored on master, accessed here for rendering)
-        self.start_date_var = start_date_var  # callable returning datetime.date or None
-        self.end_date_var = end_date_var       # callable returning datetime.date or None
+        self.start_date_var = start_date_var  # callables returning dates for period mode
+        self.end_date_var = end_date_var
         self.window: tk.Toplevel | None = None
         self.canvas_widget: FigureCanvasTkAgg | None = None
         self.ani: animation.FuncAnimation | None = None
@@ -438,7 +481,6 @@ class PlotWindow:
                     pass
             else:
                 self._render_current_mode()
-            self.window.lift()
 
     def _on_stop_setpoint_changed(self, *args) -> None:
         if self.window and tk.Toplevel.winfo_exists(self.window):
@@ -454,7 +496,6 @@ class PlotWindow:
                     pass
             else:
                 self._render_current_mode()
-            self.window.lift()
 
     def _init_live_figure(self) -> None:
         self.fig.clf()
@@ -522,10 +563,10 @@ class PlotWindow:
     def _render_historical_figure(self, mode: str) -> None:
         self.fig.clf()
 
-        # Resolve date range for "day" mode
+        # Custom dates apply only to period mode.
         start_date = None
         end_date = None
-        if mode == "day":
+        if mode == "period":
             try:
                 start_date = self.start_date_var() if callable(self.start_date_var) else None
             except Exception:
@@ -539,16 +580,16 @@ class PlotWindow:
         ts = hist["timestamps"]
 
         # Build title string
+        today = datetime.now().date()
         if mode == "day":
-            if start_date is not None and end_date is not None and start_date != end_date:
-                title_range = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
-            elif start_date is not None:
-                title_range = start_date.strftime("%Y-%m-%d")
-            else:
-                title_range = datetime.now().strftime("%Y-%m-%d")
-            plot_title = f"Environmental Telemetry and Soil Moisture (Day \u2014 {title_range})"
+            title_range = today.isoformat()
+        elif mode == "period":
+            start_date = start_date or today
+            end_date = end_date or today
+            title_range = start_date.isoformat() if start_date == end_date else f"{start_date.isoformat()} to {end_date.isoformat()}"
         else:
-            plot_title = "Environmental Telemetry and Soil Moisture (Live)"
+            title_range = f"Last {7 if mode == 'week' else 30} days"
+        plot_title = f"Environmental Telemetry and Soil Moisture\n({mode.capitalize()} \u2014 {title_range})"
 
         if not ts:
             ax = self.fig.add_subplot(1, 1, 1)
@@ -558,11 +599,11 @@ class PlotWindow:
                 ha="center", va="center", fontsize=20, color="#6c757d", fontweight="bold"
             )
             ax.axis("off")
-            self.fig.suptitle(plot_title, fontsize=24, fontweight="bold")
-            self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
+            self.fig.suptitle(plot_title, fontsize=20, fontweight="bold")
+            self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.89])
             return
 
-        self.fig.suptitle(plot_title, fontsize=24, fontweight="bold")
+        self.fig.suptitle(plot_title, fontsize=20, fontweight="bold")
 
         # Top Plot: Air temp & Soil temp (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
         ax_temp = self.fig.add_subplot(2, 1, 1)
@@ -606,11 +647,17 @@ class PlotWindow:
         ax_moist.tick_params(axis="both", labelsize=16)
         ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
 
-        # Plot water volume bars on ax_vol for any pump events (converted to mL).
-        # Bar left-edge = pump start time; half-width offset centres the bar on the event.
+        # Offset each pump's bar so simultaneous runs remain distinguishable.
         pump_events = hist.get("pump_events", [])
-        base_w = timedelta(minutes=10)   # fixed bar width for day/range view
-        half_w = base_w / 2
+        if mode in ("day", "period"):
+            base_w = timedelta(minutes=10)
+            offsets = [timedelta(minutes=m) for m in (-15, -5, 5, 15)]
+        elif mode == "week":
+            base_w = timedelta(hours=1)
+            offsets = [timedelta(minutes=m) for m in (-90, -30, 30, 90)]
+        else:
+            base_w = timedelta(hours=4)
+            offsets = [timedelta(hours=h) for h in (-6, -2, 2, 6)]
 
         for ev in pump_events:
             p_idx = ev["pump"]
@@ -619,7 +666,7 @@ class PlotWindow:
             ev_ts = ev["timestamp"]  # pump START time (from run["start"])
             if vol_ml > 0:
                 ax_vol.bar(
-                    ev_ts + half_w,  # centre bar on start time
+                    ev_ts + offsets[p_idx],
                     vol_ml,
                     width=base_w,
                     color=self.colors[p_idx],
@@ -634,21 +681,22 @@ class PlotWindow:
         ax_vol.set_ylim(0, 1000)
 
         # X-axis range and formatter
-        if mode == "day":
-            if start_date is not None and end_date is not None:
-                xlim_start = datetime.combine(start_date, datetime.min.time())
-                xlim_end = datetime.combine(end_date, datetime.max.time().replace(microsecond=0))
-            else:
-                today = datetime.now().date()
-                xlim_start = datetime.combine(today, datetime.min.time())
-                xlim_end = datetime.combine(today, datetime.max.time().replace(microsecond=0))
+        if mode in ("day", "period"):
+            first = today if mode == "day" else start_date
+            last = today if mode == "day" else end_date
+            xlim_start = datetime.combine(first, datetime.min.time())
+            xlim_end = datetime.combine(last, datetime.max.time())
             ax_moist.set_xlim(xlim_start, xlim_end)
-            # Choose formatter: HH:MM for single day, MM/DD HH:MM for multi-day
-            if start_date != end_date and start_date is not None:
-                ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
-            else:
-                ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-        ax_moist.set_xlabel("Date / time", fontsize=18, fontweight="bold")
+        if mode == "day" or (mode == "period" and start_date == end_date):
+            ax_moist.xaxis.set_major_locator(mdates.HourLocator(interval=4))
+            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+            xlabel = "Time"
+        else:
+            span_days = (end_date - start_date).days + 1 if mode == "period" else (7 if mode == "week" else 30)
+            ax_moist.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, (span_days + 6) // 7)))
+            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+            xlabel = "Date"
+        ax_moist.set_xlabel(xlabel, fontsize=18, fontweight="bold")
 
         ax_moist.legend(
             loc="lower right",
@@ -657,7 +705,7 @@ class PlotWindow:
             framealpha=0.92,
         )
 
-        self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
+        self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.89])
         self.fig.subplots_adjust(hspace=0.35)
 
     def _render_current_mode(self) -> None:
@@ -689,12 +737,11 @@ class PlotWindow:
             if self.canvas_widget:
                 self.canvas_widget.draw_idle()
             if self.window:
-                self.window.title("Historical Telemetry (Day)")
+                self.window.title(f"Historical Telemetry ({mode.capitalize()})")
 
     def _on_range_changed(self, *args) -> None:
         if self.window and tk.Toplevel.winfo_exists(self.window):
             self._render_current_mode()
-            self.window.lift()
 
     def _update(self, data: tuple):
         if len(data) >= 5:
@@ -773,36 +820,19 @@ class PlotWindow:
                 pos_y = 0
 
                 self.window.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
-                self.window.attributes("-topmost", True)
-                if self.master and getattr(self.master, "winfo_viewable", lambda: False)():
-                    try:
-                        self.window.transient(self.master)
-                    except Exception:
-                        pass
+                if self.master.winfo_viewable():
+                    # A transient stays above its parent while the control panel
+                    # can still show its menus and calendar popups.
+                    self.window.transient(self.master)
                 self.window.protocol("WM_DELETE_WINDOW", lambda: (self.toggle(False), on_close and on_close()))
-                btn_close = tk.Button(
-                    self.window,
-                    text="✕ Close",
-                    font=("arial", 20, "bold"),
-                    bg="#dc3545",
-                    fg="white",
-                    activebackground="#bb2d3b",
-                    activeforeground="white",
-                    bd=3,
-                    command=lambda: (self.toggle(False), on_close and on_close()),
-                )
-                btn_close.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=6, ipady=8)
+                self.fig.set_size_inches(win_w / self.fig.dpi, win_h / self.fig.dpi)
                 self.canvas_widget = FigureCanvasTkAgg(self.fig, master=self.window)
                 self.canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)
                 self._render_current_mode()
             else:
                 self.window.deiconify()
-                self.window.attributes("-topmost", True)
-                if self.master and getattr(self.master, "winfo_viewable", lambda: False)():
-                    try:
-                        self.window.transient(self.master)
-                    except Exception:
-                        pass
+                if self.master.winfo_viewable():
+                    self.window.transient(self.master)
                 self.window.lift()
         elif self.window and tk.Toplevel.winfo_exists(self.window):
             if self.ani and self.ani.event_source:
@@ -839,6 +869,8 @@ class MainWindow(tk.Tk):
         self._image_logger_job: str | None = None
         self._scheduled_ticker_job: str | None = None
         self._scheduled_monitor_job: str | None = None
+        self._scheduled_safety_job: str | None = None
+        self._scheduled_time_job: str | None = None
 
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.plant_ai = PlantAIDetector()
@@ -872,6 +904,8 @@ class MainWindow(tk.Tk):
         self._scheduled_run_dir: Path | None = None
         self._scheduled_start_time: float | None = None
         self._scheduled_channels_active: list[int] = []
+        self._scheduled_off_method = "SW"
+        self._scheduled_duration_sec = 0
 
         # Build UI Layout
         paned = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=4)
@@ -1143,46 +1177,57 @@ class MainWindow(tk.Tk):
         range_box = tk.Frame(card_plot, bg="white")
         range_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
         tk.Label(range_box, text="Range:", font=("arial", 18, "bold"), bg="white").pack(side=tk.LEFT, padx=(4, 2))
-        self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day")
-        self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
+        self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day", "week", "month", "period")
+        self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=7, pady=3)
         try:
             self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
         except Exception:
             pass
         self.plot_range_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Date-range frame: shown only when "day" is selected.
-        # Rows are stacked vertically so the calendar popups don't go off-screen.
+        # The custom period controls are separate from the preset day/week/month ranges.
         self._date_range_frame = tk.Frame(card_plot, bg="white")
         self._date_range_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
         self._date_entry_start = None
         self._date_entry_end = None
-        if DateEntry is not None:
-            row_start = tk.Frame(self._date_range_frame, bg="white")
-            row_start.pack(fill=tk.X, pady=(2, 1))
-            tk.Label(row_start, text="Start:", font=("arial", 16, "bold"), bg="white", width=5, anchor="w").pack(
-                side=tk.LEFT, padx=(4, 4)
+        if TouchDateEntry is not None:
+            today = date.today()
+            single_line = self.margin_w >= 460
+            start_row = tk.Frame(self._date_range_frame, bg="white")
+            start_row.pack(fill=tk.X, pady=(2, 1))
+            end_row = start_row if single_line else tk.Frame(self._date_range_frame, bg="white")
+            if not single_line:
+                end_row.pack(fill=tk.X, pady=(1, 2))
+            self._date_entry_start = TouchDateEntry(
+                start_row, width=10, background="#4361ee", foreground="white",
+                borderwidth=2, font=("arial", 14), date_pattern="yyyy-mm-dd",
+                year=today.year, month=today.month, day=today.day,
             )
-            self._date_entry_start = DateEntry(
-                row_start, width=12, background="#4361ee", foreground="white",
-                borderwidth=2, font=("arial", 15), date_pattern="yyyy-mm-dd"
+            self._date_entry_start.pack(side=tk.LEFT, padx=(4, 2))
+            if single_line:
+                tk.Label(start_row, text="–", font=("arial", 18), bg="white").pack(side=tk.LEFT, padx=2)
+            self._date_entry_end = TouchDateEntry(
+                end_row, width=10, background="#4361ee", foreground="white",
+                borderwidth=2, font=("arial", 14), date_pattern="yyyy-mm-dd",
+                year=today.year, month=today.month, day=today.day,
             )
-            self._date_entry_start.pack(side=tk.LEFT, padx=(0, 4))
+            self._date_entry_end.pack(side=tk.LEFT, padx=(2 if single_line else 4, 6))
+            self.btn_period_start = tk.Button(
+                start_row, text="◀", font=("arial", 18, "bold"), width=2, pady=4,
+                command=self._date_entry_start.drop_down,
+            )
+            if not single_line:
+                self.btn_period_start.pack(side=tk.LEFT, padx=(0, 2))
+            self.btn_period_end = tk.Button(
+                end_row, text="▶", font=("arial", 18, "bold"), width=2, pady=4,
+                command=self._date_entry_end.drop_down,
+            )
+            if single_line:
+                self.btn_period_start.pack(side=tk.LEFT, padx=(0, 2))
+            self.btn_period_end.pack(side=tk.LEFT)
 
-            row_end = tk.Frame(self._date_range_frame, bg="white")
-            row_end.pack(fill=tk.X, pady=(1, 2))
-            tk.Label(row_end, text="End:", font=("arial", 16, "bold"), bg="white", width=5, anchor="w").pack(
-                side=tk.LEFT, padx=(4, 4)
-            )
-            self._date_entry_end = DateEntry(
-                row_end, width=12, background="#4361ee", foreground="white",
-                borderwidth=2, font=("arial", 15), date_pattern="yyyy-mm-dd"
-            )
-            self._date_entry_end.pack(side=tk.LEFT, padx=(0, 4))
-
-            # Re-render when dates change
-            self._date_entry_start.bind("<<DateEntrySelected>>", lambda _e: self.plotter._render_current_mode() if self.plot_var.get() else None)
-            self._date_entry_end.bind("<<DateEntrySelected>>", lambda _e: self.plotter._render_current_mode() if self.plot_var.get() else None)
+            self._date_entry_start.bind("<<DateEntrySelected>>", lambda _e: self._on_period_date_selected("start"))
+            self._date_entry_end.bind("<<DateEntrySelected>>", lambda _e: self._on_period_date_selected("end"))
         else:
             tk.Label(
                 self._date_range_frame, text="(tkcalendar not installed)",
@@ -1190,7 +1235,7 @@ class MainWindow(tk.Tk):
             ).pack(side=tk.LEFT, padx=4)
 
         def _on_plot_range_changed(*_args):
-            if self.plot_range_var.get() == "day":
+            if self.plot_range_var.get() == "period":
                 self._date_range_frame.grid()
             else:
                 self._date_range_frame.grid_remove()
@@ -1314,6 +1359,17 @@ class MainWindow(tk.Tk):
         )
         self.btn_home.grid(row=1, column=1, sticky="nsew", padx=4, pady=4, ipady=8)
 
+    def _on_period_date_selected(self, changed: str) -> None:
+        start = self._date_entry_start.get_date()
+        end = self._date_entry_end.get_date()
+        if start > end:
+            if changed == "start":
+                self._date_entry_end.set_date(start)
+            else:
+                self._date_entry_start.set_date(end)
+        if self.plot_range_var.get() == "period" and self.plotter.window is not None:
+            self.plotter._render_current_mode()
+
     def _build_bottom_bar(self, parent: tk.Frame) -> None:
         bar = tk.Frame(parent, bg="#1a1d20", height=130, relief=tk.GROOVE, bd=3)
         bar.pack(side=tk.BOTTOM, fill=tk.X, padx=2, pady=2)
@@ -1408,62 +1464,112 @@ class MainWindow(tk.Tk):
             self._scheduled_ticker_job = self.after(60_000, self._scheduled_check_ticker)
 
     def _start_scheduled_watering(self, date_str: str | None = None) -> None:
-        if self._scheduled_watering_active:
+        if not self.auto_var.get() or self._scheduled_watering_active:
             return
         self._last_scheduled_date = date_str or datetime.now().strftime("%Y-%m-%d")
         moistures = self.telemetry.get("moisture_pct", [])
         setpoint = float(self.soil_water_setpoint.get())
-        active_channels = []
-        for ch in range(min(len(moistures), len(self.water_vars))):
-            m = moistures[ch]
-            if m is not None and m < setpoint:
-                active_channels.append(ch)
-
+        active_channels = [
+            ch for ch, m in enumerate(moistures[:len(self.water_vars)])
+            if m is not None and m < setpoint
+        ]
         if not active_channels:
-            print(f"[Scheduled] All soil moisture channels >= setpoint ({setpoint}%). No watering needed.")
+            print(f"[Scheduled] No channels below start setpoint ({setpoint}%).")
             return
 
-        self._scheduled_watering_active = True
-        self._scheduled_start_time = time.time()
-        self._scheduled_channels_active = list(active_channels)
-
-        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._scheduled_run_dir = SCHEDULED_WATERING_DIR / run_stamp
-        self._scheduled_run_dir.mkdir(parents=True, exist_ok=True)
-
-        mask = ["1" if i in active_channels else "0" for i in range(len(self.water_vars))]
-        for i in range(len(self.water_vars)):
-            self.water_vars[i].set(1 if i in active_channels else 0)
-        self.send_bitmask("".join(mask))
-
-        if self.irr_mode_var.get() == "time":
-            # Time mode: schedule a one-shot auto-off for each active channel
-            duration_ms = self.pump_duration_var.get() * 1000
-            stop_target = float(self.soil_water_stop_setpoint.get()) if hasattr(self, "soil_water_stop_setpoint") else SCHEDULED_TARGET_PCT
-            print(f"[Scheduled/Time] Watering started for channels {[c+1 for c in active_channels]} for {self.pump_duration_var.get()}s. Dir: {self._scheduled_run_dir}")
-            for ch in active_channels:
-                self.after(duration_ms, lambda i=ch: self._auto_off_relay(i))
-            # End the scheduled run after duration (add a small buffer)
-            self.after(duration_ms + 200, self._finish_scheduled_watering)
-        else:
-            stop_target = float(self.soil_water_stop_setpoint.get()) if hasattr(self, "soil_water_stop_setpoint") else SCHEDULED_TARGET_PCT
-            print(f"[Scheduled/Soil] Watering started for channels {[c+1 for c in active_channels]} with target {stop_target}%. Dir: {self._scheduled_run_dir}")
+        # Resolve settings and arm BOTH stop paths before energizing any pump.
+        # Use the same mode variable as the SW/Time dropdown.
+        try:
+            self._scheduled_off_method = self.off_method_var.get()
+            if self._scheduled_off_method not in ("SW", "Time"):
+                raise ValueError("Unknown irrigation turn-off method")
+            self._scheduled_duration_sec = max(
+                1, min(SCHEDULED_MAX_WATERING_SEC, int(self.pump_duration_var.get()))
+            )
+            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._scheduled_run_dir = SCHEDULED_WATERING_DIR / run_stamp
+            self._scheduled_run_dir.mkdir(parents=True, exist_ok=True)
+            self._scheduled_start_time = time.monotonic()
+            self._scheduled_channels_active = list(active_channels)
+            self._scheduled_watering_active = True
+            self._scheduled_safety_job = self.after(
+                SCHEDULED_MAX_WATERING_SEC * 1000, self._scheduled_safety_stop
+            )
+            if self._scheduled_off_method == "Time":
+                self._scheduled_time_job = self.after(
+                    self._scheduled_duration_sec * 1000, self._finish_scheduled_watering
+                )
             self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
+            self._apply_scheduled_channels()
+            print(f"[Scheduled/{self._scheduled_off_method}] Started channels {[c+1 for c in active_channels]}.")
+        except Exception:
+            self._finish_scheduled_watering()
+            raise
+
+    def _apply_scheduled_channels(self) -> None:
+        mask = "".join(
+            "1" if i in self._scheduled_channels_active else "0"
+            for i in range(len(self.water_vars))
+        )
+        for i, var in enumerate(self.water_vars):
+            var.set(1 if i in self._scheduled_channels_active else 0)
+        self.send_bitmask(mask)
 
     def _finish_scheduled_watering(self) -> None:
-        """Mark the current scheduled watering run as complete (used after Time-mode one-shots)."""
+        """Stop pumps and cancel every callback owned by this scheduled run."""
         self._scheduled_watering_active = False
         self._scheduled_channels_active = []
-        elapsed = time.time() - (self._scheduled_start_time or time.time())
-        print(f"[Scheduled/Time] Watering run completed in {elapsed:.1f}s.")
+        self._scheduled_start_time = None
+        for var in self.water_vars:
+            var.set(0)
+        self.send_bitmask("0" * len(self.water_vars))
+        for attr in ("_scheduled_monitor_job", "_scheduled_time_job", "_scheduled_safety_job"):
+            job = getattr(self, attr)
+            setattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+
+    def _scheduled_safety_stop(self) -> None:
+        self._scheduled_safety_job = None
+        if self._scheduled_watering_active:
+            print(f"[Scheduled] Hard safety stop at {SCHEDULED_MAX_WATERING_SEC}s.")
+            self._finish_scheduled_watering()
 
     def _scheduled_watering_monitor(self) -> None:
+        self._scheduled_monitor_job = None
         if not self._scheduled_watering_active:
             return
+        try:
+            elapsed = time.monotonic() - self._scheduled_start_time
+            if not self.auto_var.get() or elapsed >= SCHEDULED_MAX_WATERING_SEC:
+                self._finish_scheduled_watering()
+                return
+            if self._scheduled_off_method == "Time":
+                if elapsed >= self._scheduled_duration_sec:
+                    self._finish_scheduled_watering()
+                    return
+            else:
+                stop_target = float(self.soil_water_stop_setpoint.get())
+                moistures = self.telemetry.get("moisture_pct", [])
+                self._scheduled_channels_active = [
+                    ch for ch in self._scheduled_channels_active
+                    if ch < len(moistures) and moistures[ch] is not None
+                    and moistures[ch] < stop_target
+                ]
+                if not self._scheduled_channels_active:
+                    self._finish_scheduled_watering()
+                    return
+            self._apply_scheduled_channels()
+        except Exception as e:
+            print(f"[Scheduled] Control error; stopping pumps: {e}")
+            self._finish_scheduled_watering()
+            return
 
-        elapsed = time.time() - (self._scheduled_start_time or time.time())
-
-        # 1. Independent clean raw image capture
+        # Stop decisions and relay writes precede optional camera/disk work.
+        self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
         if self.camera and self.camera.is_available and self._scheduled_run_dir:
             try:
                 clean_frame = self.camera.capture_array()
@@ -1472,42 +1578,6 @@ class MainWindow(tk.Tk):
                     cv2.imwrite(str(self._scheduled_run_dir / img_name), clean_frame)
             except Exception as e:
                 print(f"[Scheduled Monitor] Image capture error: {e}")
-
-        # 2. Check per-channel target cutoff
-        stop_target = float(self.soil_water_stop_setpoint.get()) if hasattr(self, "soil_water_stop_setpoint") else SCHEDULED_TARGET_PCT
-        moistures = self.telemetry.get("moisture_pct", [])
-        still_active = []
-        for ch in self._scheduled_channels_active:
-            m = moistures[ch] if ch < len(moistures) else None
-            if m is not None and m >= stop_target:
-                print(f"[Scheduled] Channel S{ch+1} reached {m:.1f}% >= target ({stop_target}%). Turning OFF pump.")
-            else:
-                still_active.append(ch)
-
-        self._scheduled_channels_active = still_active
-        timed_out = elapsed >= SCHEDULED_MAX_WATERING_SEC
-
-        if timed_out and still_active:
-            print(f"[Scheduled WARNING] Safety timeout ({SCHEDULED_MAX_WATERING_SEC}s) reached! Stopping all pumps.")
-            summary_moist = [f"S{c+1}: {moistures[c]:.1f}%" if c < len(moistures) and moistures[c] is not None else f"S{c+1}: N/A" for c in still_active]
-            print(f"[Scheduled WARNING] Active channels remaining: {', '.join(summary_moist)}")
-
-        if not still_active or timed_out:
-            for i in range(len(self.water_vars)):
-                self.water_vars[i].set(0)
-            self.send_bitmask("0" * len(self.water_vars))
-            self._scheduled_watering_active = False
-            self._scheduled_channels_active = []
-            print(f"[Scheduled] Watering run completed in {elapsed:.1f}s. Timeout={timed_out}.")
-            return
-
-        # Update relays for remaining active channels
-        mask = ["1" if i in self._scheduled_channels_active else "0" for i in range(len(self.water_vars))]
-        for i in range(len(self.water_vars)):
-            self.water_vars[i].set(1 if i in self._scheduled_channels_active else 0)
-        self.send_bitmask("".join(mask))
-
-        self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
 
     def _bind_capture_click_hold(self) -> None:
         def on_press(event=None):
@@ -1571,18 +1641,13 @@ class MainWindow(tk.Tk):
         state = tk.DISABLED if is_auto else tk.NORMAL
         for b in self.water_btns:
             b.config(state=state, disabledforeground="#9e9e9e")
-        if not is_auto:
-            # Cancel all relay timers and ensure all pumps are off on mode switch
-            for i, job in enumerate(self._relay_timers):
-                if job is not None:
-                    try:
-                        self.after_cancel(job)
-                    except Exception:
-                        pass
-                    self._relay_timers[i] = None
-            for v in self.water_vars:
-                v.set(0)
-            self.send_bitmask("0" * len(self.water_vars))
+        # Stop any existing run on either mode transition. Old callbacks must
+        # never re-energize pumps after the user has switched to MANUAL.
+        self._finish_scheduled_watering()
+        for i, job in enumerate(self._relay_timers):
+            if job is not None:
+                self.after_cancel(job)
+                self._relay_timers[i] = None
 
     def _on_live_toggle(self) -> None:
         live = bool(self.live_var.get())
@@ -1640,7 +1705,7 @@ class MainWindow(tk.Tk):
                 mask = "".join(str(v.get()) for v in self.water_vars)
                 self.send_bitmask(mask)
                 # Schedule auto-off after duration
-                duration_ms = self.pump_duration_var.get() * 1000
+                duration_ms = max(1, min(SCHEDULED_MAX_WATERING_SEC, self.pump_duration_var.get())) * 1000
                 job = self.after(duration_ms, lambda i=relay_idx: self._auto_off_relay(i))
                 if relay_idx < len(self._relay_timers):
                     self._relay_timers[relay_idx] = job
@@ -1916,6 +1981,9 @@ class MainWindow(tk.Tk):
             getattr(self, "_image_logger_job", None),
             getattr(self, "_scheduled_ticker_job", None),
             getattr(self, "_scheduled_monitor_job", None),
+            getattr(self, "_scheduled_safety_job", None),
+            getattr(self, "_scheduled_time_job", None),
+            *self._relay_timers,
             getattr(self, "_repeat_job", None),
         ):
             if job is not None:
