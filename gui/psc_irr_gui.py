@@ -583,7 +583,7 @@ class PlotWindow:
             else:
                 self._render_current_mode()
 
-    def _plot_environment(self, x, air_temp, soil_temp, rh, light, tick_size):
+    def _plot_environment(self, x, air_temp, soil_temp, rh, light, tick_size, dot_style=None):
         """Use the same sampled-sensor styling and axes in every plot mode."""
         self.ax_temp = self.fig.add_subplot(2, 1, 1)
         self.ax_light = self.ax_temp.twinx()
@@ -595,7 +595,8 @@ class PlotWindow:
             (self.ax_light, light, DARK_YELLOW, "Light, Lux"),
         ):
             y = [v if v is not None else np.nan for v in values]
-            (artist,) = axis.plot(x, y, color=color, label=label, **SENSOR_DOTS)
+            (artist,) = axis.plot(x, y, color=color, label=label,
+                                  **(dot_style if dot_style is not None else SENSOR_DOTS))
             artists.append(artist)
         self.line_temp, self.line_soil_temp, self.line_rh, self.line_light = artists
         self.ax_temp.set_ylim(0, 100)
@@ -693,9 +694,12 @@ class PlotWindow:
 
         self.fig.suptitle(plot_title, fontsize=20, fontweight="bold")
 
+        # Shrink dots as the displayed span grows, including custom periods.
+        span_days = max(1.0, (last - first).total_seconds() / 86400)
+        dot_style = {**SENSOR_DOTS, "markersize": max(0.65, 2.0 / span_days ** 0.25)}
         self._plot_environment(
             ts, hist["air_temp"], hist["soil_temp"], hist["humidity"],
-            hist["light"], tick_size=16,
+            hist["light"], tick_size=16, dot_style=dot_style,
         )
         ax_temp = self.ax_temp
 
@@ -707,7 +711,7 @@ class PlotWindow:
 
         for i, c in enumerate(self.colors):
             y_vals = [v if v is not None else np.nan for v in hist["moisture"][i]]
-            (line,) = ax_moist.plot(ts, y_vals, color=c, label=f"S{i+1}", **SENSOR_DOTS)
+            (line,) = ax_moist.plot(ts, y_vals, color=c, label=f"S{i+1}", **dot_style)
             self.lines_moist.append(line)
 
         sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
@@ -1250,8 +1254,8 @@ class MainWindow(tk.Tk):
             bd=2, relief=tk.GROOVE, bg="white", fg="#212529",
         )
         self.card_data.pack(fill=tk.X, padx=10, pady=5)
-        self.card_data.grid_columnconfigure(0, weight=1)
-        self.card_data.grid_columnconfigure(1, weight=1)
+        self.card_data.grid_columnconfigure(0, weight=1, uniform="data_col")
+        self.card_data.grid_columnconfigure(1, weight=1, uniform="data_col")
         self.ckb_plot = tk.Checkbutton(
             self.card_data, text="PLOT", font=("arial", 23, "bold"), bg="white",
             selectcolor="#b0bec5", bd=3, indicatoron=False, variable=self.plot_var,
@@ -1260,43 +1264,47 @@ class MainWindow(tk.Tk):
         self.ckb_plot.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
         range_box = tk.Frame(self.card_data, bg="white")
         range_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
-        tk.Label(range_box, text="Range:", font=("arial", 18, "bold"), bg="white").pack(side=tk.LEFT, padx=(4, 2))
+        tk.Label(range_box, text="Range:", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(side=tk.LEFT, padx=(4, 2))
         self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day", "week", "month", "period")
         self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=7, pady=3)
         self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
         self.plot_range_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self._date_range_frame = tk.Frame(self.card_data, bg="white", height=76)
+        self._date_range_frame = tk.Frame(self.card_data, bg="white", height=48)
         self._date_range_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6)
         self._date_range_frame.grid_propagate(False)
         self._date_range_frame.grid_columnconfigure(0, weight=1)
         self._date_range_frame.grid_rowconfigure(0, weight=1)
         self.range_summary_label = tk.Label(
             self._date_range_frame, textvariable=self.range_summary_var,
-            font=("arial", 14), bg="white", wraplength=330,
+            font=("arial", 12), bg="white", anchor="w",
         )
-        self.range_summary_label.grid(row=0, column=0, sticky="nsew")
+        self.range_summary_label.grid(row=0, column=0, sticky="ew", padx=(4, 2))
         self.btn_period = tk.Button(
-            self._date_range_frame, text="Select period", font=("arial", 14, "bold"),
+            self._date_range_frame, text="Select period", font=("arial", 12, "bold"),
             command=self._open_period_picker, pady=6,
         )
-        self.btn_period.grid(row=1, column=0, pady=(0, 4))
+        self.btn_period.grid(row=0, column=1, padx=(2, 0), pady=4)
         self.record_label = tk.Label(self.card_data, text="Record", font=("arial", 16, "bold"), bg="white")
-        self.record_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 0))
-        tk.Label(self.card_data, text="Data :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
-            row=3, column=0, sticky="w", padx=(10, 4), pady=4,
+        self.record_label.grid(row=2, column=0, rowspan=2, sticky="nw", padx=10, pady=8)
+        self.data_record_frame = tk.Frame(self.card_data, bg="white")
+        self.data_record_frame.grid(row=2, column=1, sticky="nsew", padx=(3, 6), pady=4)
+        self.image_record_frame = tk.Frame(self.card_data, bg="white")
+        self.image_record_frame.grid(row=3, column=1, sticky="nsew", padx=(3, 6), pady=4)
+        tk.Label(self.data_record_frame, text="Data :", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(
+            side=tk.LEFT, padx=(4, 2),
         )
-        self.data_record_dropdown = tk.OptionMenu(self.card_data, self.data_record_var, "10s", "1min", "1hr")
-        self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
+        self.data_record_dropdown = tk.OptionMenu(self.data_record_frame, self.data_record_var, "10s", "1min", "1hr")
+        self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=4, pady=3)
         self.data_record_dropdown["menu"].config(font=("arial", 15, "bold"))
-        self.data_record_dropdown.grid(row=3, column=1, sticky="ew", padx=(4, 10), pady=4)
-        tk.Label(self.card_data, text="Image :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
-            row=4, column=0, sticky="w", padx=(10, 4), pady=4,
+        self.data_record_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(self.image_record_frame, text="Image :", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(
+            side=tk.LEFT, padx=(4, 2),
         )
-        self.image_record_dropdown = tk.OptionMenu(self.card_data, self.image_record_var, "1sec", "1min", "1hr", "1day")
-        self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
+        self.image_record_dropdown = tk.OptionMenu(self.image_record_frame, self.image_record_var, "1sec", "1min", "1hr", "1day")
+        self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=4, pady=3)
         self.image_record_dropdown["menu"].config(font=("arial", 15, "bold"))
-        self.image_record_dropdown.grid(row=4, column=1, sticky="ew", padx=(4, 10), pady=4)
+        self.image_record_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.plot_range_var.trace_add("write", self._on_plot_range_changed)
         self._on_plot_range_changed()
 
@@ -1464,7 +1472,7 @@ class MainWindow(tk.Tk):
         row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(6, 0))
         tk.Label(row1, text="ENV:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
 
-        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 16, "bold"), fg="#ffffff", bg="#1a1d20")
+        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 16, "bold"), fg=DARK_YELLOW, bg="#1a1d20")
         self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 16, "bold"), fg="#06d6a0", bg="#1a1d20")
         self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 16, "bold"), fg="#4cc9f0", bg="#1a1d20")
         self.lbl_light = tk.Label(row1, text="Light: -- lux", font=("arial", 16, "bold"), fg="#f72585", bg="#1a1d20")
@@ -1479,7 +1487,7 @@ class MainWindow(tk.Tk):
         row2 = tk.Frame(bar, bg="#1a1d20")
         row2.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(2, 6))
         tk.Label(row2, text="Soil moisture:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
-        self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=("arial", 16, "bold"), fg="#ffffff", bg="#1a1d20")
+        self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=("arial", 16, "bold"), fg=DARK_YELLOW, bg="#1a1d20")
         self.lbl_soil_moist.pack(side=tk.LEFT, padx=10)
 
     def _start_periodic_loggers(self) -> None:

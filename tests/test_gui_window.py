@@ -229,11 +229,13 @@ def test_data_card_order_and_reserved_dates(headless_app):
         "min", "day", "week", "month", "period"
     ]
     assert app.card_data["text"].strip() == "DATA"
-    assert app.ckb_plot.master is app.data_record_dropdown.master is app.card_data
+    assert app.ckb_plot.master is app.record_label.master is app.card_data
     assert app.ckb_plot.grid_info()["row"] == 0
     assert app.record_label.grid_info()["row"] == 2
-    assert app.data_record_dropdown.grid_info()["row"] == 3
-    assert app.image_record_dropdown.grid_info()["row"] == 4
+    assert app.record_label.grid_info()["column"] == app.ckb_plot.grid_info()["column"] == 0
+    assert app.data_record_frame.grid_info()["row"] == 2
+    assert app.image_record_frame.grid_info()["row"] == 3
+    assert app.data_record_frame.grid_info()["column"] == app.image_record_frame.grid_info()["column"] == 1
     now = datetime(2026, 10, 2, 12)
     record_positions = []
     for mode, expected in (
@@ -247,9 +249,16 @@ def test_data_card_order_and_reserved_dates(headless_app):
         app.update_idletasks()
         assert app.range_summary_var.get() == expected
         assert app._date_range_frame.winfo_manager() == "grid"
-        record_positions.append(app.data_record_dropdown.winfo_y())
+        record_positions.append(app.data_record_frame.winfo_y())
     assert len(set(record_positions)) == 1
     assert app.btn_period.winfo_manager() == "grid"
+    assert app.range_summary_label.grid_info()["row"] == app.btn_period.grid_info()["row"] == 0
+    assert app.range_summary_label.grid_info()["column"] < app.btn_period.grid_info()["column"]
+    dropdowns = (app.plot_range_dropdown, app.data_record_dropdown, app.image_record_dropdown)
+    assert len({dropdown.winfo_rootx() for dropdown in dropdowns}) == 1
+    assert len({dropdown.winfo_width() for dropdown in dropdowns}) == 1
+    assert app.range_summary_label.winfo_rootx() + app.range_summary_label.winfo_width() <= app.btn_period.winfo_rootx()
+    assert app.range_summary_label.winfo_width() >= app.range_summary_label.winfo_reqwidth()
     app.plot_range_var.set("min")
     assert app.btn_period.winfo_manager() == ""
 

@@ -91,16 +91,29 @@ def test_historical_axes_and_return_to_live(plotter, tmp_path, monkeypatch):
         HEADER + f"{day} 00:00:00,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
         + f"{day} 00:10:00,400,400,400,400,null,41,42,43,22,24,58,null,0000,55,30\n"
     )
+    sizes = {"min": plotter.line_temp.get_markersize()}
     for mode in ("day", "week", "month", "period"):
         plotter._render_historical_figure(mode)
         assert_sensor_axes(plotter)
         assert math.isnan(plotter.line_light.get_ydata()[1])
+        sizes[mode] = plotter.line_temp.get_markersize()
+        assert all(artist.get_markersize() == sizes[mode] for artist in (
+            *plotter.lines_moist, plotter.line_soil_temp, plotter.line_rh, plotter.line_light,
+        ))
+    assert sizes["min"] == 4
+    assert 0 < sizes["month"] < sizes["week"] < sizes["day"] < sizes["min"]
+    assert sizes["period"] == sizes["day"]
+    plotter.start_date_var = lambda: date.today().replace(year=date.today().year - 1)
+    plotter.end_date_var = date.today
+    plotter._render_historical_figure("period")
+    assert 0 < plotter.line_temp.get_markersize() < sizes["month"]
     plotter.toggle(True)
     plotter._update((1, [40], 22, 24, 58, 1200))
     plotter.range_var.set("day")
     plotter.range_var.set("min")
     assert plotter.ydata_light == []
     assert_sensor_axes(plotter)
+    assert plotter.line_temp.get_markersize() == sizes["min"]
 
 
 def test_range_bounds_and_labels_share_rolling_policy(tmp_path):
