@@ -95,6 +95,10 @@ except (ImportError, ModuleNotFoundError):
     from modules.arducam import Camera
     from modules.plant_ai import PlantAIDetector
 
+# Plot styling
+DARK_YELLOW = "#B8860B"
+SENSOR_DOTS = {"marker": "o", "linestyle": "None", "markersize": 4}
+
 # Constants & Soil Calibration
 BAUDRATE = 9600
 SOIL_WATER_SETPOINT = 40.0  # 10am scheduled check starts watering below this moisture %
@@ -464,7 +468,7 @@ class PlotWindow:
         self.ax_moist = None
         self.ax_vol = None
         self.ax_temp = None
-        self.ax_rh = None
+        self.ax_light = None
 
         self._init_live_figure()
         self._trace_id = self.range_var.trace_add("write", self._on_range_changed)
@@ -505,46 +509,47 @@ class PlotWindow:
             else:
                 self._render_current_mode()
 
+    def _plot_environment(self, x, air_temp, soil_temp, rh, light, tick_size):
+        """Use the same sampled-sensor styling and axes in every plot mode."""
+        self.ax_temp = self.fig.add_subplot(2, 1, 1)
+        self.ax_light = self.ax_temp.twinx()
+        artists = []
+        for axis, values, color, label in (
+            (self.ax_temp, air_temp, "#d62728", "Air temp, °C"),
+            (self.ax_temp, soil_temp, "#d95f02", "Soil temp, °C"),
+            (self.ax_temp, rh, "#00838f", "RH, %"),
+            (self.ax_light, light, DARK_YELLOW, "Light, Lux"),
+        ):
+            y = [v if v is not None else np.nan for v in values]
+            (artist,) = axis.plot(x, y, color=color, label=label, **SENSOR_DOTS)
+            artists.append(artist)
+        self.line_temp, self.line_soil_temp, self.line_rh, self.line_light = artists
+        self.ax_temp.set_ylim(0, 100)
+        self.ax_temp.set_ylabel("Air T/RH, °C/%", fontsize=20, fontweight="bold")
+        self.ax_temp.tick_params(axis="both", labelsize=tick_size)
+        self.ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
+        self.ax_light.set_ylim(0, 3000)
+        self.ax_light.set_ylabel("Light, Lux", fontsize=20, fontweight="bold", color=DARK_YELLOW)
+        self.ax_light.tick_params(axis="y", labelcolor=DARK_YELLOW, labelsize=tick_size)
+        self.ax_temp.legend(
+            artists, [a.get_label() for a in artists], loc="lower right",
+            fontsize=16, ncol=2, framealpha=0.92,
+        )
+
     def _init_live_figure(self) -> None:
         self.fig.clf()
         self.fig.suptitle("Environmental Telemetry and Soil Moisture (Last 60 sec)", fontsize=24, fontweight="bold")
 
-        # Top Plot: Air temp & Soil temp (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
-        self.ax_temp = self.fig.add_subplot(2, 1, 1)
-        self.ax_rh = self.ax_temp.twinx()
-
-        (self.line_temp,) = self.ax_temp.plot([], [], color="#d62728", linewidth=3.6, label="Air temp, °C")
-        (self.line_soil_temp,) = self.ax_temp.plot(
-            [], [], color="#d95f02", linewidth=3.6, linestyle="--", label="Soil temp, °C"
-        )
-        (self.line_rh,) = self.ax_rh.plot([], [], color="#00838f", linewidth=3.6, label="RH, %")
-
-        self.ax_temp.set_ylim(0, 50)
+        self.ax_vol = None
+        self._plot_environment([], [], [], [], [], tick_size=18)
         self.ax_temp.set_xlim(0, 60)
         self.ax_temp.set_xticks([0, 10, 20, 30, 40, 50, 60])
-        self.ax_temp.set_ylabel("Air temp, °C", fontsize=20, fontweight="bold", color="#d62728")
-        self.ax_temp.tick_params(axis="x", labelsize=18)
-        self.ax_temp.tick_params(axis="y", labelcolor="#d62728", labelsize=18)
-        self.ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
-
-        self.ax_rh.set_ylim(0, 100)
-        self.ax_rh.set_ylabel("Relative humidity, %", fontsize=20, fontweight="bold", color="#00838f")
-        self.ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=18)
-
-        self.ax_temp.legend(
-            [self.line_temp, self.line_soil_temp, self.line_rh],
-            ["Air temp, °C", "Soil temp, °C", "RH, %"],
-            loc="lower right",
-            fontsize=18,
-            ncol=3,
-            framealpha=0.92,
-        )
 
         # Bottom Plot: Soil Moisture (0-100%)
         self.ax_moist = self.fig.add_subplot(2, 1, 2, sharex=self.ax_temp)
         self.lines_moist = []
         for i, c in enumerate(self.colors):
-            (line,) = self.ax_moist.plot([], [], color=c, linewidth=3.6, label=f"S{i+1}")
+            (line,) = self.ax_moist.plot([], [], color=c, label=f"S{i+1}", **SENSOR_DOTS)
             self.lines_moist.append(line)
 
         sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
@@ -570,6 +575,10 @@ class PlotWindow:
 
     def _render_historical_figure(self, mode: str) -> None:
         self.fig.clf()
+        self.ax_temp = self.ax_light = self.ax_moist = self.ax_vol = None
+        self.line_temp = self.line_soil_temp = self.line_rh = self.line_light = None
+        self.line_setpoint = self.line_stop = None
+        self.lines_moist = []
 
         # Custom dates apply only to period mode.
         start_date = None
@@ -613,42 +622,27 @@ class PlotWindow:
 
         self.fig.suptitle(plot_title, fontsize=20, fontweight="bold")
 
-        # Top Plot: Air temp & Soil temp (0-50°C, Left Y-axis) & Relative Humidity (0-100%, Right Y-axis)
-        ax_temp = self.fig.add_subplot(2, 1, 1)
-        ax_rh = ax_temp.twinx()
-
-        y_temp = [v if v is not None else np.nan for v in hist["air_temp"]]
-        y_soil = [v if v is not None else np.nan for v in hist["soil_temp"]]
-        y_rh = [v if v is not None else np.nan for v in hist["humidity"]]
-
-        (l_t,) = ax_temp.plot(ts, y_temp, color="#d62728", linewidth=2.8, label="Air temp, °C")
-        (l_s,) = ax_temp.plot(ts, y_soil, color="#d95f02", linewidth=2.8, linestyle="--", label="Soil temp, °C")
-        (l_rh,) = ax_rh.plot(ts, y_rh, color="#00838f", linewidth=2.8, label="RH, %")
-
-        ax_temp.set_ylim(0, 50)
-        ax_temp.set_ylabel("Air temp, °C", fontsize=20, fontweight="bold", color="#d62728")
-        ax_temp.tick_params(axis="both", labelsize=16)
-        ax_temp.tick_params(axis="y", labelcolor="#d62728")
-        ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
-
-        ax_rh.set_ylim(0, 100)
-        ax_rh.set_ylabel("Relative humidity, %", fontsize=20, fontweight="bold", color="#00838f")
-        ax_rh.tick_params(axis="y", labelcolor="#00838f", labelsize=16)
-
-        ax_temp.legend([l_t, l_s, l_rh], ["Air temp, °C", "Soil temp, °C", "RH, %"], loc="lower right", fontsize=16, ncol=3, framealpha=0.92)
+        self._plot_environment(
+            ts, hist["air_temp"], hist["soil_temp"], hist["humidity"],
+            hist["light"], tick_size=16,
+        )
+        ax_temp = self.ax_temp
 
         # Bottom Plot: Soil Moisture (0-100%) & Secondary Water Volume Axis (mL)
         ax_moist = self.fig.add_subplot(2, 1, 2, sharex=ax_temp)
         ax_vol = ax_moist.twinx()
+        self.ax_moist, self.ax_vol = ax_moist, ax_vol
+        self.lines_moist = []
 
         for i, c in enumerate(self.colors):
             y_vals = [v if v is not None else np.nan for v in hist["moisture"][i]]
-            ax_moist.plot(ts, y_vals, color=c, linewidth=2.8, label=f"S{i+1}")
+            (line,) = ax_moist.plot(ts, y_vals, color=c, label=f"S{i+1}", **SENSOR_DOTS)
+            self.lines_moist.append(line)
 
         sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
         ssp = float(self.stop_setpoint_var.get()) if self.stop_setpoint_var else SCHEDULED_TARGET_PCT
-        ax_moist.axhline(sp, color="#e63946", linestyle="--", linewidth=2.2)
-        ax_moist.axhline(ssp, color="#2ecc71", linestyle="--", linewidth=2.2)
+        self.line_setpoint = ax_moist.axhline(sp, color="#e63946", linestyle="--", linewidth=2.2)
+        self.line_stop = ax_moist.axhline(ssp, color="#2ecc71", linestyle="--", linewidth=2.2)
 
         ax_moist.set_ylim(0, 100)
         ax_moist.set_ylabel("Soil moisture, %", fontsize=20, fontweight="bold")
@@ -795,8 +789,7 @@ class PlotWindow:
         if self.line_light:
             self.line_light.set_data(self.xdata, self.ydata_light)
 
-        artists = tuple(self.lines_moist) + (self.line_temp, self.line_soil_temp, self.line_rh)
-        return artists + (self.line_light,) if self.line_light is not None else artists
+        return tuple(self.lines_moist) + (self.line_temp, self.line_soil_temp, self.line_rh, self.line_light)
 
     def _gen(self):
         t0 = time.time()

@@ -1,12 +1,13 @@
 """Regression checks for sensor data supplied to live and historical plots."""
 
-from datetime import datetime
+from datetime import date, datetime
 import math
 import tkinter as tk
 
 import pytest
 
 from gui.psc_irr_gui import PlotWindow, read_historical_telemetry
+import gui.psc_irr_gui as gui
 from tests.mock_telemetry import HEADER
 
 
@@ -55,3 +56,48 @@ def test_live_light_legacy_tuples_and_sweep_reset(plotter):
     plotter._update((0, [50], 23, 25, 60, 1500))
     assert plotter.ydata_light == [1500]
     assert plotter.xdata == [0]
+
+
+def assert_sensor_axes(plotter):
+    assert plotter.ax_temp.get_ylim() == (0, 100)
+    assert plotter.ax_temp.get_ylabel() == "Air T/RH, °C/%"
+    assert plotter.ax_light.get_ylim() == (0, 3000)
+    assert plotter.ax_light.get_ylabel() == "Light, Lux"
+    assert plotter.line_rh.axes is plotter.ax_temp
+    assert plotter.line_light.axes is plotter.ax_light
+    assert plotter.line_light.get_color() == gui.DARK_YELLOW
+    for artist in (*plotter.lines_moist, plotter.line_temp,
+                   plotter.line_soil_temp, plotter.line_rh, plotter.line_light):
+        assert artist.get_linestyle() == "None"
+        assert artist.get_marker() == "o"
+    assert plotter.line_setpoint.get_linestyle() == "--"
+    assert plotter.line_stop.get_linestyle() == "--"
+
+
+def test_live_dots_leave_missing_samples_empty(plotter):
+    plotter._update((0, [40], 22, 24, 58, 0))
+    plotter._update((10, [None], None, None, None, None))
+    artists = plotter._update((50, [45], 23, 25, 60, 1200))
+    assert len(artists) == 8
+    assert_sensor_axes(plotter)
+    assert math.isnan(plotter.line_light.get_ydata()[1])
+    assert math.isnan(plotter.lines_moist[0].get_ydata()[1])
+
+
+def test_historical_axes_and_return_to_live(plotter, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "TELEMETRY_DIR", tmp_path)
+    day = date.today().isoformat()
+    (tmp_path / "telemetry_today.csv").write_text(
+        HEADER + f"{day} 00:00:00,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
+        + f"{day} 00:10:00,400,400,400,400,null,41,42,43,22,24,58,null,0000,55,30\n"
+    )
+    for mode in ("day", "week", "month", "period"):
+        plotter._render_historical_figure(mode)
+        assert_sensor_axes(plotter)
+        assert math.isnan(plotter.line_light.get_ydata()[1])
+    plotter.toggle(True)
+    plotter._update((1, [40], 22, 24, 58, 1200))
+    plotter.range_var.set("day")
+    plotter.range_var.set("min")
+    assert plotter.ydata_light == []
+    assert_sensor_axes(plotter)

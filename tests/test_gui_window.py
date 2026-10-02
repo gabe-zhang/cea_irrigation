@@ -128,9 +128,9 @@ def test_plot_window_lifecycle(headless_app):
     plotter.toggle(True)
     assert plotter.window is not None
 
-    # Feed data update (returns 4 moisture lines + soil temp + air temp + RH = 7 lines)
+    # Feed data update (returns 4 moisture artists + soil temp + air temp + RH + light)
     lines = plotter._update((10.0, moistures, 24.5, 23.0, 50.0))
-    assert len(lines) == 7
+    assert len(lines) == 8
 
     # Hide / Close window
     plotter.toggle(False)
@@ -163,8 +163,8 @@ def test_plot_window_layout_order_and_legend(headless_app):
     # 3. Top subplot is temperature & RH, Bottom is soil moisture
     assert plotter.ax_temp is not None
     assert plotter.ax_moist is not None
-    assert "Air temp" in plotter.ax_temp.get_ylabel()
-    assert "Relative humidity" in plotter.ax_rh.get_ylabel()
+    assert plotter.ax_temp.get_ylabel() == "Air T/RH, °C/%"
+    assert plotter.ax_light.get_ylabel() == "Light, Lux"
     assert "Soil moisture" in plotter.ax_moist.get_ylabel()
     assert plotter.ax_temp.get_subplotspec().rowspan.start < plotter.ax_moist.get_subplotspec().rowspan.start
 
@@ -386,12 +386,14 @@ def test_read_historical_telemetry_flow_rate_and_events(tmp_path):
 
     ev1, ev2 = hist["pump_events"]
     assert ev1["pump"] == 0
-    assert ev1["volume"] == 12.5
-    assert ev1["duration"] == 90.0
+    # Historical events use the existing 60-second safety cap, even for
+    # older logs containing a longer run.
+    assert ev1["volume"] == 8.33
+    assert ev1["duration"] == 60.0
 
     assert ev2["pump"] == 1
-    assert ev2["volume"] == 12.5
-    assert ev2["duration"] == 90.0
+    assert ev2["volume"] == 8.33
+    assert ev2["duration"] == 60.0
 
 
 def test_plot_window_threshold_lines_and_dynamic_setpoint(headless_app):
