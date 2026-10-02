@@ -117,6 +117,41 @@ def test_read_historical_telemetry_ranges(tmp_path):
     assert len(res_month["timestamps"]) == 4
 
 
+def test_period_is_inclusive_and_day_ignores_custom_dates(tmp_path):
+    from datetime import date
+
+    header = (
+        "timestamp,soil1_raw,soil2_raw,soil3_raw,soil4_raw,"
+        "soil1_pct,soil2_pct,soil3_pct,soil4_pct,"
+        "soil_temp_c,air_temp_c,humidity_pct,light,relays,pan_deg,tilt_deg\n"
+    )
+    for day in ("2026-09-30", "2026-10-01", "2026-10-02"):
+        stamp = day.replace("-", "")
+        (tmp_path / f"telemetry_{stamp}.csv").write_text(
+            header + f"{day} 23:59:59,410,390,420,400,45,50,42,46,22,24,57,1200,0000,55,30\n",
+            encoding="utf-8",
+        )
+
+    now = datetime(2026, 10, 2, 23, 59, 59)
+    period = read_historical_telemetry(
+        tmp_path, "period", now=now,
+        start_date=date(2026, 9, 30), end_date=date(2026, 10, 1),
+    )
+    assert [stamp.date() for stamp in period["timestamps"]] == [
+        date(2026, 9, 30), date(2026, 10, 1)
+    ]
+    day = read_historical_telemetry(
+        tmp_path, "day", now=now,
+        start_date=date(2026, 9, 30), end_date=date(2026, 10, 1),
+    )
+    assert [stamp.date() for stamp in day["timestamps"]] == [date(2026, 10, 2)]
+    with pytest.raises(ValueError, match="start date"):
+        read_historical_telemetry(
+            tmp_path, "period", now=now,
+            start_date=date(2026, 10, 2), end_date=date(2026, 10, 1),
+        )
+
+
 def test_read_historical_telemetry_corrupt_and_edge_cases(tmp_path):
     now = datetime(2026, 9, 10, 15, 0, 0)
 
@@ -347,7 +382,7 @@ def test_scheduled_watering_safety_timeout(headless_gui, tmp_path, monkeypatch):
         assert app._scheduled_channels_active == [0]
 
     # Simulate elapsed time surpassing 180s (e.g. 182 seconds) while channel is still at 60%
-    app._scheduled_start_time = time.time() - (SCHEDULED_MAX_WATERING_SEC + 2)
+    app._scheduled_start_time = time.monotonic() - (SCHEDULED_MAX_WATERING_SEC + 2)
     app.telemetry["moisture_pct"] = [60.0, 50.0, 50.0, 50.0]
 
     with patch.object(app, "after"):
@@ -520,5 +555,4 @@ def test_spinbox_large_buttons_and_gimbal_shrink(headless_gui):
         parts = str(gimbal_font).split()
         size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 26
     assert size <= 30, f"Gimbal button font size {size} is too large, should be <= 30"
-
 

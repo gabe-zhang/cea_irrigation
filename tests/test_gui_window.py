@@ -140,13 +140,19 @@ def test_plot_window_lifecycle(headless_app):
 def test_plot_window_layout_order_and_legend(headless_app):
     app = headless_app
     plotter = PlotWindow(app, lambda: [10.0, 20.0, 30.0, 40.0])
-    plotter.toggle(True)
+    topmost_requests = []
+    original_attributes = tk.Toplevel.attributes
+
+    def record_attributes(window, *args):
+        topmost_requests.append(args)
+        return original_attributes(window, *args)
+
+    with patch.object(tk.Toplevel, "attributes", record_attributes):
+        plotter.toggle(True)
     plotter.window.update_idletasks()
 
-    # 1. Plot window is configured topmost (in live X11/Wayland returns 1, in headless with withdrawn master may be 0 or 1)
-    assert plotter.window.attributes("-topmost") in (0, 1, True)
-    # Ensure calling attributes('-topmost', True) succeeds without error
-    plotter.window.attributes("-topmost", True)
+    assert ("-topmost", True) not in topmost_requests
+    assert all(child.winfo_class() != "Button" for child in plotter.window.winfo_children())
 
     # 2. Window width leaves right control panel exposed
     scr_w = app.winfo_screenwidth()
@@ -167,8 +173,128 @@ def test_plot_window_layout_order_and_legend(headless_app):
     leg_moist = plotter.ax_moist.get_legend()
     assert leg_temp is not None and leg_temp._loc in (4, "lower right")
     assert leg_moist is not None and leg_moist._loc in (4, "lower right")
-
     plotter.toggle(False)
+
+
+def test_plot_stays_above_main_and_calendar_stays_above_plot(headless_app):
+    app = headless_app
+    app.deiconify()
+    app.update_idletasks()
+    assert app.winfo_viewable()
+
+    app.plotter.toggle(True)
+    assert str(app.plotter.window.transient()) == str(app)
+
+    if app._date_entry_start is not None:
+        app.plot_range_var.set("period")
+        entry = app._date_entry_start
+        with patch.object(entry._top_cal, "attributes", wraps=entry._top_cal.attributes) as attributes:
+            entry.drop_down()
+        assert entry._top_cal.winfo_ismapped()
+        assert not any(call.args == ("-topmost", True) for call in attributes.call_args_list)
+        entry.drop_down()
+
+    app.plotter.toggle(False)
+
+
+def test_end_date_calendar_fits_inside_main_window(headless_app):
+    app = headless_app
+    if app._date_entry_end is None:
+        pytest.skip("tkcalendar is unavailable")
+    app.geometry("1000x800+0+0")
+    app.plot_range_var.set("period")
+    app.deiconify()
+    app.update_idletasks()
+
+    entry = app._date_entry_end
+    entry.drop_down()
+    app.update_idletasks()
+    popup = entry._top_cal
+    assert popup.winfo_ismapped()
+    assert popup.winfo_rootx() >= app.winfo_rootx()
+    assert popup.winfo_rootx() + popup.winfo_width() <= app.winfo_rootx() + app.winfo_width()
+    assert popup.winfo_rootx() + popup.winfo_width() <= app.winfo_screenwidth()
+    entry.drop_down()
+
+
+def test_plot_range_menu_and_period_dates(headless_app):
+    app = headless_app
+    menu = app.plot_range_dropdown["menu"]
+    assert [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)] == [
+        "min", "day", "week", "month", "period"
+    ]
+    assert app._date_range_frame.winfo_manager() == ""
+    app.plot_range_var.set("period")
+    app.update_idletasks()
+    assert app._date_range_frame.winfo_manager() == "grid"
+
+    if app._date_entry_start is None:
+        pytest.skip("tkcalendar is unavailable")
+    from datetime import date
+    assert app._date_entry_start.get_date() == date.today()
+    assert app._date_entry_end.get_date() == date.today()
+
+    app._date_entry_start.set_date(date(2026, 10, 3))
+    app._on_period_date_selected("start")
+    assert app._date_entry_end.get_date() == date(2026, 10, 3)
+    app._date_entry_end.set_date(date(2026, 9, 28))
+    app._on_period_date_selected("end")
+    assert app._date_entry_start.get_date() == date(2026, 9, 28)
+
+    app.update_idletasks()
+    assert app.btn_period_start.winfo_reqwidth() >= 40
+    assert app.btn_period_end.winfo_reqwidth() >= 40
+    for entry in (app._date_entry_start, app._date_entry_end):
+        assert "downarrow" not in str(entry.style.layout(entry.cget("style"))).lower()
+        calendar = entry._calendar
+        for button in (calendar._l_month, calendar._r_month, calendar._l_year, calendar._r_year):
+            assert button.cget("width") == 3
+            assert int(entry.style.lookup(button.cget("style"), "arrowsize")) >= 24
+            assert int(button.pack_info()["ipadx"]) >= 12
+            assert int(button.pack_info()["ipady"]) >= 10
+
+    app.plot_range_var.set("day")
+    assert app._date_range_frame.winfo_manager() == ""
+
+
+def test_plot_mode_labels_and_window_manager_close(headless_app, tmp_path, monkeypatch):
+    from datetime import date, timedelta
+    from tests.mock_telemetry import generate_mock_data
+
+    app = headless_app
+    monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
+    generate_mock_data(date.today(), tmp_path)
+    app.plot_var.set(1)
+    app.plotter.toggle(True, lambda: app.plot_var.set(0))
+    assert app.plotter.window.winfo_exists()
+
+    for mode, title, fmt in (
+        ("day", "Day", "%H:%M"),
+        ("week", "Week", "%Y-%m-%d"),
+        ("month", "Month", "%Y-%m-%d"),
+    ):
+        app.plot_range_var.set(mode)
+        assert title in app.plotter.window.title()
+        assert app.plotter.fig.axes[2].xaxis.get_major_formatter().fmt == fmt
+
+    if app._date_entry_start is not None:
+        app._date_entry_start.set_date(date.today() - timedelta(days=1))
+        app._date_entry_end.set_date(date.today())
+        app.plot_range_var.set("period")
+        assert "Period" in app.plotter.window.title()
+        assert app.plotter.fig.axes[2].xaxis.get_major_formatter().fmt == "%Y-%m-%d"
+
+    close_command = app.plotter.window.protocol("WM_DELETE_WINDOW")
+    app.tk.call(close_command)
+    assert app.plotter.window is None
+    assert app.plotter.ani is None
+    assert app.plot_var.get() == 0
+
+    app.plot_var.set(1)
+    app.plotter.toggle(True, lambda: app.plot_var.set(0))
+    app.plot_var.set(0)
+    app.plotter.toggle(False)
+    assert app.plotter.window is None
 
 
 def test_mainwindow_on_closing(headless_app):
