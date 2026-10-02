@@ -30,51 +30,10 @@ import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 try:
-    from tkcalendar import DateEntry
+    from tkcalendar import Calendar
 except ImportError:
-    DateEntry = None
+    Calendar = None
 
-
-if DateEntry is not None:
-    class TouchDateEntry(DateEntry):
-        """DateEntry with reachable popups and larger calendar navigation targets."""
-
-        def __init__(self, master=None, **kwargs):
-            super().__init__(master, **kwargs)
-            # The large adjacent button is the calendar control, so hide the
-            # small DateEntry combobox arrow without changing its date logic.
-            self.style.layout("PeriodDate.TEntry", self.style.layout("TEntry"))
-            self.configure(style="PeriodDate.TEntry", state="readonly")
-            calendar = self._calendar
-            calendar.configure(font=("arial", 16))
-            for button in (calendar._l_month, calendar._r_month, calendar._l_year, calendar._r_year):
-                button.configure(width=3)
-                self.style.configure(button.cget("style"), arrowsize=24, padding=(10, 10))
-                button.pack_configure(ipadx=12, ipady=10)
-
-        def drop_down(self):
-            super().drop_down()
-            if not self._top_cal.winfo_ismapped():
-                return
-            plotter = getattr(self.winfo_toplevel(), "plotter", None)
-            plot_window = getattr(plotter, "window", None)
-            if plot_window is not None and plot_window.winfo_exists():
-                # Raise this popup over the plot without covering other menus.
-                self._top_cal.lift(plot_window)
-            self._top_cal.update_idletasks()
-            width = max(self._top_cal.winfo_width(), self._top_cal.winfo_reqwidth(),
-                        self._calendar.winfo_width(), self._calendar.winfo_reqwidth())
-            height = max(self._top_cal.winfo_height(), self._top_cal.winfo_reqheight())
-            main = self.winfo_toplevel()
-            left = max(0, main.winfo_rootx())
-            right = min(self.winfo_screenwidth(), main.winfo_rootx() + main.winfo_width())
-            x = max(left, min(self.winfo_rootx(), right - width))
-            y = self.winfo_rooty() + self.winfo_height()
-            if y + height > self.winfo_screenheight():
-                y = self.winfo_rooty() - height
-            self._top_cal.geometry(f"+{x}+{max(0, y)}")
-else:
-    TouchDateEntry = None
 
 import cv2
 import matplotlib
@@ -266,6 +225,136 @@ def find_arduino_port() -> str | None:
     return ports[0].device if ports else None
 
 
+def telemetry_range_bounds(
+    mode: str, now: datetime, start_date: date | None = None,
+    end_date: date | None = None,
+) -> tuple[datetime, datetime]:
+    """Resolve the same bounds for filtering, plot limits, and date labels."""
+    mode = mode.strip().lower()
+    if mode == "day":
+        return (datetime.combine(now.date(), datetime.min.time()),
+                datetime.combine(now.date(), datetime.max.time()))
+    if mode in ("week", "month"):
+        return now - timedelta(days=7 if mode == "week" else 30), now
+    if mode == "period":
+        start_date, end_date = start_date or now.date(), end_date or now.date()
+        if start_date > end_date:
+            raise ValueError("Period start date must not be after end date")
+        return (datetime.combine(start_date, datetime.min.time()),
+                datetime.combine(end_date, datetime.max.time()))
+    raise ValueError(f"Unknown telemetry range: {mode}")
+
+
+def range_date_label(mode: str, now: datetime, start_date=None, end_date=None) -> str:
+    if mode == "min":
+        return ""
+    first, last = telemetry_range_bounds(mode, now, start_date, end_date)
+    if mode == "day":
+        return first.date().isoformat()
+    return f"{first.date().isoformat()} – {last.date().isoformat()}"
+
+
+class PeriodRangePicker(tk.Toplevel):
+    """One nonmodal calendar with draft dates committed only on Apply."""
+
+    def __init__(self, master, start: date, end: date, on_apply, anchor):
+        super().__init__(master)
+        self.withdraw()
+        self.title("Select period")
+        self.resizable(False, False)
+        self.on_apply = on_apply
+        self.draft_start = self.draft_end = None
+        self.committed_start, self.committed_end = start, end
+        self.status = tk.StringVar(self, value="Choose start date")
+        tk.Label(self, textvariable=self.status, font=("arial", 16, "bold"),
+                 pady=8).pack(fill=tk.X)
+        self.calendar = Calendar(
+            self, selectmode="day", year=start.year, month=start.month, day=start.day,
+            date_pattern="yyyy-mm-dd", font=("arial", 16), showweeknumbers=False,
+        )
+        self.calendar.pack(padx=10, pady=4)
+        self.calendar.tag_config("range", background="#dce6ff", foreground="#212529")
+        self.calendar.tag_config("endpoint", background="#4361ee", foreground="white")
+        # tkcalendar exposes navigation widgets internally; these are the same
+        # touch adjustments used by the previous calendar controls.
+        style = ttk.Style(self)
+        for button in (self.calendar._l_month, self.calendar._r_month,
+                       self.calendar._l_year, self.calendar._r_year):
+            button.configure(width=3)
+            style.configure(button.cget("style"), arrowsize=24, padding=(10, 10))
+            button.pack_configure(ipadx=12, ipady=10)
+        self.calendar.bind("<<CalendarSelected>>", self._on_selected)
+        self.calendar.bind("<<CalendarMonthChanged>>", lambda _e: self._highlight())
+        buttons = tk.Frame(self)
+        buttons.pack(fill=tk.X, padx=10, pady=10)
+        self.apply_button = tk.Button(
+            buttons, text="Apply", state=tk.DISABLED, command=self.apply,
+            font=("arial", 16, "bold"), padx=18, pady=10,
+        )
+        self.apply_button.pack(side=tk.RIGHT)
+        tk.Button(buttons, text="Cancel", command=self.destroy,
+                  font=("arial", 16), padx=18, pady=10).pack(side=tk.LEFT)
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.calendar.selection_clear()
+        self._highlight()
+        self.update_idletasks()
+        parent = getattr(getattr(master, "plotter", None), "window", None)
+        if parent is None or not parent.winfo_exists():
+            parent = master
+        if parent.winfo_viewable():
+            self.transient(parent)
+        width, height = self.winfo_reqwidth(), self.winfo_reqheight()
+        left, top = max(0, master.winfo_rootx()), max(0, master.winfo_rooty())
+        right = min(self.winfo_screenwidth(), master.winfo_rootx() + master.winfo_width())
+        bottom = min(self.winfo_screenheight(), master.winfo_rooty() + master.winfo_height())
+        x = max(left, min(anchor.winfo_rootx(), right - width))
+        y = max(top, min(anchor.winfo_rooty() + anchor.winfo_height(), bottom - height))
+        self.geometry(f"+{x}+{y}")
+        self.deiconify()
+        self.lift()
+        self.focus_set()
+
+    def _on_selected(self, _event=None):
+        selected = self.calendar.selection_get()
+        if selected is not None:
+            self.select_date(selected)
+
+    def select_date(self, selected: date):
+        if self.draft_start is None or self.draft_end is not None:
+            self.draft_start, self.draft_end = selected, None
+            self.status.set(f"Start: {selected.isoformat()} · Choose end date")
+            self.apply_button.configure(state=tk.DISABLED)
+        else:
+            self.draft_start, self.draft_end = sorted((self.draft_start, selected))
+            self.status.set(f"{self.draft_start.isoformat()} – {self.draft_end.isoformat()}")
+            self.apply_button.configure(state=tk.NORMAL)
+        self.calendar.selection_clear()
+        self._highlight()
+
+    def _highlight(self):
+        self.calendar.calevent_remove("all")
+        first = self.draft_start or self.committed_start
+        last = (self.draft_end or first) if self.draft_start else self.committed_end
+        # Only tag the displayed month and neighboring days, so even a range
+        # spanning many years takes a bounded amount of work on the Tk thread.
+        month, year = self.calendar.get_displayed_month()
+        month_start = date(year, month, 1)
+        next_month = (month_start + timedelta(days=32)).replace(day=1)
+        current = max(first, month_start - timedelta(days=7))
+        stop = min(last, next_month + timedelta(days=7))
+        while current <= stop:
+            tag = "endpoint" if current in (first, last) else "range"
+            self.calendar.calevent_create(current, "", tags=[tag])
+            current += timedelta(days=1)
+
+    def apply(self):
+        if self.draft_start is None or self.draft_end is None:
+            return
+        self.on_apply(self.draft_start, self.draft_end)
+        self.destroy()
+
+
 def read_historical_telemetry(
     telemetry_dir: Path,
     range_mode: str,
@@ -283,22 +372,7 @@ def read_historical_telemetry(
         now = datetime.now()
 
     mode = range_mode.strip().lower()
-    if mode == "day":
-        cutoff = datetime.combine(now.date(), datetime.min.time())
-        end_cutoff = datetime.combine(now.date(), datetime.max.time())
-    elif mode == "week":
-        cutoff, end_cutoff = now - timedelta(days=7), now
-    elif mode == "month":
-        cutoff, end_cutoff = now - timedelta(days=30), now
-    elif mode == "period":
-        start_date = start_date or now.date()
-        end_date = end_date or now.date()
-        if start_date > end_date:
-            raise ValueError("Period start date must not be after end date")
-        cutoff = datetime.combine(start_date, datetime.min.time())
-        end_cutoff = datetime.combine(end_date, datetime.max.time())
-    else:
-        raise ValueError(f"Unknown telemetry range: {range_mode}")
+    cutoff, end_cutoff = telemetry_range_bounds(mode, now, start_date, end_date)
 
     timestamps: list[datetime] = []
     moistures: list[list[float | None]] = [[], [], [], []]
@@ -593,19 +667,16 @@ class PlotWindow:
             except Exception:
                 end_date = None
 
-        hist = read_historical_telemetry(TELEMETRY_DIR, mode, start_date=start_date, end_date=end_date)
+        now = datetime.now()
+        if hasattr(self.master, "_refresh_range_summary"):
+            self.master._refresh_range_summary(now)
+        hist = read_historical_telemetry(TELEMETRY_DIR, mode, now=now,
+                                         start_date=start_date, end_date=end_date)
         ts = hist["timestamps"]
 
-        # Build title string
-        today = datetime.now().date()
-        if mode == "day":
-            title_range = today.isoformat()
-        elif mode == "period":
-            start_date = start_date or today
-            end_date = end_date or today
-            title_range = start_date.isoformat() if start_date == end_date else f"{start_date.isoformat()} to {end_date.isoformat()}"
-        else:
-            title_range = f"Last {7 if mode == 'week' else 30} days"
+        first, last = telemetry_range_bounds(mode, now, start_date, end_date)
+        start_date, end_date = first.date(), last.date()
+        title_range = range_date_label(mode, now, start_date, end_date)
         plot_title = f"Environmental Telemetry and Soil Moisture\n({mode.capitalize()} \u2014 {title_range})"
 
         if not ts:
@@ -683,12 +754,7 @@ class PlotWindow:
         ax_vol.set_ylim(0, 1000)
 
         # X-axis range and formatter
-        if mode in ("day", "period"):
-            first = today if mode == "day" else start_date
-            last = today if mode == "day" else end_date
-            xlim_start = datetime.combine(first, datetime.min.time())
-            xlim_end = datetime.combine(last, datetime.max.time())
-            ax_moist.set_xlim(xlim_start, xlim_end)
+        ax_moist.set_xlim(first, last)
         if mode == "day" or (mode == "period" and start_date == end_date):
             ax_moist.xaxis.set_major_locator(mdates.HourLocator(interval=4))
             ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
@@ -896,6 +962,11 @@ class MainWindow(tk.Tk):
         self.stop_setpoint_display = tk.StringVar(value=f"{SCHEDULED_TARGET_PCT:.0f}%")
         self.plot_var = tk.IntVar(value=0)
         self.plot_range_var = tk.StringVar(value="min")
+        self.period_start = self.period_end = date.today()
+        self.range_summary_var = tk.StringVar(value="")
+        self._period_picker = None
+        self._range_refresh_job = None
+        self._range_refresh_date = date.today()
         self.data_record_var = tk.StringVar(value="10s")
         self.image_record_var = tk.StringVar(value="1hr")
         self.live_var = tk.IntVar(value=1)
@@ -969,9 +1040,10 @@ class MainWindow(tk.Tk):
             lambda: self.telemetry,
             range_var=self.plot_range_var,
             setpoint_var=self.soil_water_setpoint,
-            start_date_var=lambda: self._date_entry_start.get_date() if hasattr(self, "_date_entry_start") and self._date_entry_start is not None else None,
-            end_date_var=lambda: self._date_entry_end.get_date() if hasattr(self, "_date_entry_end") and self._date_entry_end is not None else None,
+            start_date_var=lambda: self.period_start,
+            end_date_var=lambda: self.period_end,
         )
+        self._range_refresh_job = self.after(1000, self._refresh_range_day)
         self._build_menu()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -1172,119 +1244,61 @@ class MainWindow(tk.Tk):
         self.rebuild_relays(4)
         self._on_auto_toggle()
 
-        # Card 2: PLOT (Untitled card with groove border)
-        card_plot = tk.Frame(self.sidebar_content, relief=tk.GROOVE, bd=2, bg="#ffffff")
-        card_plot.pack(fill=tk.X, padx=10, pady=5)
-        card_plot.grid_columnconfigure(0, weight=1)
-        card_plot.grid_columnconfigure(1, weight=1)
-
+        # Plot and recording controls share one Data card.
+        self.card_data = tk.LabelFrame(
+            self.sidebar_content, text=" DATA ", font=("arial", 17, "bold"),
+            bd=2, relief=tk.GROOVE, bg="white", fg="#212529",
+        )
+        self.card_data.pack(fill=tk.X, padx=10, pady=5)
+        self.card_data.grid_columnconfigure(0, weight=1)
+        self.card_data.grid_columnconfigure(1, weight=1)
         self.ckb_plot = tk.Checkbutton(
-            card_plot, text="PLOT", font=("arial", 23, "bold"), bg="white",
+            self.card_data, text="PLOT", font=("arial", 23, "bold"), bg="white",
             selectcolor="#b0bec5", bd=3, indicatoron=False, variable=self.plot_var,
-            command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0))
+            command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0)),
         )
         self.ckb_plot.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
-
-        range_box = tk.Frame(card_plot, bg="white")
+        range_box = tk.Frame(self.card_data, bg="white")
         range_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
         tk.Label(range_box, text="Range:", font=("arial", 18, "bold"), bg="white").pack(side=tk.LEFT, padx=(4, 2))
         self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day", "week", "month", "period")
         self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=7, pady=3)
-        try:
-            self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
-        except Exception:
-            pass
+        self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
         self.plot_range_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # The custom period controls are separate from the preset day/week/month ranges.
-        self._date_range_frame = tk.Frame(card_plot, bg="white")
-        self._date_range_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
-        self._date_entry_start = None
-        self._date_entry_end = None
-        if TouchDateEntry is not None:
-            today = date.today()
-            single_line = self.margin_w >= 460
-            start_row = tk.Frame(self._date_range_frame, bg="white")
-            start_row.pack(fill=tk.X, pady=(2, 1))
-            end_row = start_row if single_line else tk.Frame(self._date_range_frame, bg="white")
-            if not single_line:
-                end_row.pack(fill=tk.X, pady=(1, 2))
-            self._date_entry_start = TouchDateEntry(
-                start_row, width=10, background="#4361ee", foreground="white",
-                borderwidth=2, font=("arial", 14), date_pattern="yyyy-mm-dd",
-                year=today.year, month=today.month, day=today.day,
-            )
-            self._date_entry_start.pack(side=tk.LEFT, padx=(4, 2))
-            if single_line:
-                tk.Label(start_row, text="–", font=("arial", 18), bg="white").pack(side=tk.LEFT, padx=2)
-            self._date_entry_end = TouchDateEntry(
-                end_row, width=10, background="#4361ee", foreground="white",
-                borderwidth=2, font=("arial", 14), date_pattern="yyyy-mm-dd",
-                year=today.year, month=today.month, day=today.day,
-            )
-            self._date_entry_end.pack(side=tk.LEFT, padx=(2 if single_line else 4, 6))
-            self.btn_period_start = tk.Button(
-                start_row, text="◀", font=("arial", 18, "bold"), width=2, pady=4,
-                command=self._date_entry_start.drop_down,
-            )
-            if not single_line:
-                self.btn_period_start.pack(side=tk.LEFT, padx=(0, 2))
-            self.btn_period_end = tk.Button(
-                end_row, text="▶", font=("arial", 18, "bold"), width=2, pady=4,
-                command=self._date_entry_end.drop_down,
-            )
-            if single_line:
-                self.btn_period_start.pack(side=tk.LEFT, padx=(0, 2))
-            self.btn_period_end.pack(side=tk.LEFT)
-
-            self._date_entry_start.bind("<<DateEntrySelected>>", lambda _e: self._on_period_date_selected("start"))
-            self._date_entry_end.bind("<<DateEntrySelected>>", lambda _e: self._on_period_date_selected("end"))
-        else:
-            tk.Label(
-                self._date_range_frame, text="(tkcalendar not installed)",
-                font=("arial", 13), bg="white", fg="#6c757d"
-            ).pack(side=tk.LEFT, padx=4)
-
-        def _on_plot_range_changed(*_args):
-            if self.plot_range_var.get() == "period":
-                self._date_range_frame.grid()
-            else:
-                self._date_range_frame.grid_remove()
-
-        self.plot_range_var.trace_add("write", _on_plot_range_changed)
-        # Initialize visibility
-        _on_plot_range_changed()
-
-        # Card 3: RECORD
-        card_record = tk.LabelFrame(
-            self.sidebar_content, text=" RECORD ", font=("arial", 17, "bold"),
-            bd=2, relief=tk.GROOVE, bg="#ffffff", fg="#212529"
+        self._date_range_frame = tk.Frame(self.card_data, bg="white", height=76)
+        self._date_range_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6)
+        self._date_range_frame.grid_propagate(False)
+        self._date_range_frame.grid_columnconfigure(0, weight=1)
+        self._date_range_frame.grid_rowconfigure(0, weight=1)
+        self.range_summary_label = tk.Label(
+            self._date_range_frame, textvariable=self.range_summary_var,
+            font=("arial", 14), bg="white", wraplength=330,
         )
-        card_record.pack(fill=tk.X, padx=10, pady=5)
-        card_record.grid_columnconfigure(0, weight=1)
-        card_record.grid_columnconfigure(1, weight=2)
-
-        tk.Label(card_record, text="Data  :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
-            row=0, column=0, sticky="w", padx=(10, 4), pady=4
+        self.range_summary_label.grid(row=0, column=0, sticky="nsew")
+        self.btn_period = tk.Button(
+            self._date_range_frame, text="Select period", font=("arial", 14, "bold"),
+            command=self._open_period_picker, pady=6,
         )
-        self.data_record_dropdown = tk.OptionMenu(card_record, self.data_record_var, "10s", "1min", "1hr")
+        self.btn_period.grid(row=1, column=0, pady=(0, 4))
+        self.record_label = tk.Label(self.card_data, text="Record", font=("arial", 16, "bold"), bg="white")
+        self.record_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 0))
+        tk.Label(self.card_data, text="Data :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
+            row=3, column=0, sticky="w", padx=(10, 4), pady=4,
+        )
+        self.data_record_dropdown = tk.OptionMenu(self.card_data, self.data_record_var, "10s", "1min", "1hr")
         self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
-        try:
-            self.data_record_dropdown["menu"].config(font=("arial", 15, "bold"))
-        except Exception:
-            pass
-        self.data_record_dropdown.grid(row=0, column=1, sticky="ew", padx=(4, 10), pady=4)
-
-        tk.Label(card_record, text="Image :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
-            row=1, column=0, sticky="w", padx=(10, 4), pady=4
+        self.data_record_dropdown["menu"].config(font=("arial", 15, "bold"))
+        self.data_record_dropdown.grid(row=3, column=1, sticky="ew", padx=(4, 10), pady=4)
+        tk.Label(self.card_data, text="Image :", font=("arial", 18, "bold"), bg="white", anchor="w").grid(
+            row=4, column=0, sticky="w", padx=(10, 4), pady=4,
         )
-        self.image_record_dropdown = tk.OptionMenu(card_record, self.image_record_var, "1sec", "1min", "1hr", "1day")
+        self.image_record_dropdown = tk.OptionMenu(self.card_data, self.image_record_var, "1sec", "1min", "1hr", "1day")
         self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=5, pady=3)
-        try:
-            self.image_record_dropdown["menu"].config(font=("arial", 15, "bold"))
-        except Exception:
-            pass
-        self.image_record_dropdown.grid(row=1, column=1, sticky="ew", padx=(4, 10), pady=4)
+        self.image_record_dropdown["menu"].config(font=("arial", 15, "bold"))
+        self.image_record_dropdown.grid(row=4, column=1, sticky="ew", padx=(4, 10), pady=4)
+        self.plot_range_var.trace_add("write", self._on_plot_range_changed)
+        self._on_plot_range_changed()
 
         # Card 4: IMAGE
         card_image = tk.LabelFrame(
@@ -1370,16 +1384,61 @@ class MainWindow(tk.Tk):
         )
         self.btn_home.grid(row=1, column=1, sticky="nsew", padx=4, pady=4, ipady=8)
 
-    def _on_period_date_selected(self, changed: str) -> None:
-        start = self._date_entry_start.get_date()
-        end = self._date_entry_end.get_date()
-        if start > end:
-            if changed == "start":
-                self._date_entry_end.set_date(start)
-            else:
-                self._date_entry_start.set_date(end)
-        if self.plot_range_var.get() == "period" and self.plotter.window is not None:
+    def _refresh_range_summary(self, now=None):
+        now = now or datetime.now()
+        mode = self.plot_range_var.get()
+        self.range_summary_var.set(range_date_label(mode, now, self.period_start, self.period_end))
+        if mode == "period" and Calendar is None:
+            self.range_summary_var.set("Calendar unavailable")
+
+    def _on_plot_range_changed(self, *_args):
+        self._refresh_range_summary()
+        if self.plot_range_var.get() == "period":
+            self.btn_period.grid()
+            self.btn_period.configure(state=tk.NORMAL if Calendar else tk.DISABLED)
+        else:
+            self.btn_period.grid_remove()
+            self._close_period_picker()
+
+    def _refresh_range_day(self):
+        now = datetime.now()
+        if now.date() != self._range_refresh_date:
+            self._range_refresh_date = now.date()
+            self._refresh_range_summary(now)
+            if self.plot_range_var.get() in ("day", "week", "month") and self.plotter.window:
+                self.plotter._render_current_mode()
+        self._range_refresh_job = self.after(1000, self._refresh_range_day)
+
+    def _open_period_picker(self):
+        if Calendar is None or self.plot_range_var.get() != "period":
+            return
+        if self._period_picker is not None and self._period_picker.winfo_exists():
+            self._period_picker.lift()
+            self._period_picker.focus_set()
+            return
+        self._period_picker = PeriodRangePicker(
+            self, self.period_start, self.period_end, self._apply_period, self.btn_period,
+        )
+
+    def _apply_period(self, start: date, end: date):
+        self.period_start, self.period_end = start, end
+        self._refresh_range_summary()
+        if self.plot_range_var.get() == "period" and self.plotter.window:
             self.plotter._render_current_mode()
+
+    def _close_period_picker(self):
+        if self._period_picker is not None and self._period_picker.winfo_exists():
+            self._period_picker.destroy()
+        self._period_picker = None
+
+    def destroy(self):
+        job = getattr(self, "_range_refresh_job", None)
+        if job is not None:
+            self.after_cancel(job)
+            self._range_refresh_job = None
+        if hasattr(self, "_period_picker"):
+            self._close_period_picker()
+        super().destroy()
 
     def _build_bottom_bar(self, parent: tk.Frame) -> None:
         bar = tk.Frame(parent, bg="#1a1d20", height=130, relief=tk.GROOVE, bd=3)

@@ -189,7 +189,7 @@ def test_read_historical_telemetry_corrupt_and_edge_cases(tmp_path):
 @pytest.fixture
 def headless_gui():
     """Create headless MainWindow instance with background loops mocked."""
-    with patch("gui.psc_irr_gui.Camera"):
+    with patch("gui.psc_irr_gui.Camera"), patch("gui.psc_irr_gui.PlantAIDetector"):
         with patch.object(MainWindow, "_init_serial"):
             with patch.object(MainWindow, "_camera_loop"):
                 with patch.object(MainWindow, "_start_periodic_loggers"):
@@ -555,4 +555,3 @@ def test_spinbox_large_buttons_and_gimbal_shrink(headless_gui):
         parts = str(gimbal_font).split()
         size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 26
     assert size <= 30, f"Gimbal button font size {size} is too large, should be <= 30"
-

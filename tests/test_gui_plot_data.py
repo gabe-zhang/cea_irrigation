@@ -6,7 +6,7 @@ import tkinter as tk
 
 import pytest
 
-from gui.psc_irr_gui import PlotWindow, read_historical_telemetry
+from gui.psc_irr_gui import PlotWindow, read_historical_telemetry, telemetry_range_bounds, range_date_label
 import gui.psc_irr_gui as gui
 from tests.mock_telemetry import HEADER
 
@@ -101,3 +101,18 @@ def test_historical_axes_and_return_to_live(plotter, tmp_path, monkeypatch):
     plotter.range_var.set("min")
     assert plotter.ydata_light == []
     assert_sensor_axes(plotter)
+
+
+def test_range_bounds_and_labels_share_rolling_policy(tmp_path):
+    now = datetime(2026, 10, 2, 12)
+    assert telemetry_range_bounds("week", now) == (datetime(2026, 9, 25, 12), now)
+    assert telemetry_range_bounds("month", now) == (datetime(2026, 9, 2, 12), now)
+    assert range_date_label("week", now) == "2026-09-25 – 2026-10-02"
+    assert range_date_label("month", now) == "2026-09-02 – 2026-10-02"
+    (tmp_path / "telemetry_bounds.csv").write_text(
+        HEADER + "2026-09-25 11:59:59,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
+        + "2026-09-25 12:00:00,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
+        + "2026-10-02 12:00:01,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
+    )
+    hist = read_historical_telemetry(tmp_path, "week", now=now)
+    assert hist["timestamps"] == [datetime(2026, 9, 25, 12)]

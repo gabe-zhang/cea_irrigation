@@ -12,11 +12,18 @@ from gui.psc_irr_gui import MainWindow, PlotWindow, SOIL_WATER_SETPOINT
 @pytest.fixture
 def headless_app():
     """Create a MainWindow instance in withdrawn state with hardware loops suppressed during init."""
-    with patch("gui.psc_irr_gui.Camera"):
+    with patch("gui.psc_irr_gui.Camera"), patch("gui.psc_irr_gui.PlantAIDetector"):
         with patch.object(MainWindow, "_init_serial"):
-            with patch.object(MainWindow, "_camera_loop"):
+            with patch.object(MainWindow, "_camera_loop"), \
+                    patch.object(MainWindow, "_start_periodic_loggers"), \
+                    patch.object(MainWindow, "_start_scheduled_ticker"):
                 app = MainWindow()
     app.withdraw()
+    app.plant_ai.is_available = False
+    app.plant_ai.last_latency_ms = 0.0
+    app.plant_ai.detect_and_analyze.return_value = ([], 0.0)
+    app.plant_ai.draw_overlay.side_effect = lambda frame, *_args, **_kwargs: frame
+    app.plant_ai.draw_full_frame_heatmap.side_effect = lambda frame, *_args, **_kwargs: frame
     yield app
     try:
         app.destroy()
@@ -180,81 +187,157 @@ def test_plot_stays_above_main_and_calendar_stays_above_plot(headless_app):
     app = headless_app
     app.deiconify()
     app.update_idletasks()
-    assert app.winfo_viewable()
-
     app.plotter.toggle(True)
     assert str(app.plotter.window.transient()) == str(app)
-
-    if app._date_entry_start is not None:
-        app.plot_range_var.set("period")
-        entry = app._date_entry_start
-        with patch.object(entry._top_cal, "attributes", wraps=entry._top_cal.attributes) as attributes:
-            entry.drop_down()
-        assert entry._top_cal.winfo_ismapped()
-        assert not any(call.args == ("-topmost", True) for call in attributes.call_args_list)
-        entry.drop_down()
-
+    app.plot_range_var.set("period")
+    with patch.object(tk.Toplevel, "attributes", autospec=True) as attributes:
+        app._open_period_picker()
+    popup = app._period_picker
+    app.update_idletasks()
+    assert popup.winfo_ismapped()
+    assert str(popup.transient()) == str(app.plotter.window)
+    assert not any(call.args[1:] == ("-topmost", True) for call in attributes.call_args_list)
+    app._open_period_picker()
+    assert app._period_picker is popup
     app.plotter.toggle(False)
 
 
-def test_end_date_calendar_fits_inside_main_window(headless_app):
+@pytest.mark.parametrize("geometry", ["1920x1005+0+0", "1000x800+0+0"])
+def test_range_calendar_fits_inside_main_window(headless_app, geometry):
     app = headless_app
-    if app._date_entry_end is None:
-        pytest.skip("tkcalendar is unavailable")
-    app.geometry("1000x800+0+0")
+    app.geometry(geometry)
     app.plot_range_var.set("period")
     app.deiconify()
     app.update_idletasks()
-
-    entry = app._date_entry_end
-    entry.drop_down()
+    app._open_period_picker()
     app.update_idletasks()
-    popup = entry._top_cal
+    popup = app._period_picker
     assert popup.winfo_ismapped()
     assert popup.winfo_rootx() >= app.winfo_rootx()
+    assert popup.winfo_rooty() >= app.winfo_rooty()
     assert popup.winfo_rootx() + popup.winfo_width() <= app.winfo_rootx() + app.winfo_width()
+    assert popup.winfo_rooty() + popup.winfo_height() <= app.winfo_rooty() + app.winfo_height()
     assert popup.winfo_rootx() + popup.winfo_width() <= app.winfo_screenwidth()
-    entry.drop_down()
 
 
-def test_plot_range_menu_and_period_dates(headless_app):
+def test_data_card_order_and_reserved_dates(headless_app):
+    from datetime import date, datetime
+
     app = headless_app
     menu = app.plot_range_dropdown["menu"]
     assert [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)] == [
         "min", "day", "week", "month", "period"
     ]
-    assert app._date_range_frame.winfo_manager() == ""
-    app.plot_range_var.set("period")
-    app.update_idletasks()
-    assert app._date_range_frame.winfo_manager() == "grid"
+    assert app.card_data["text"].strip() == "DATA"
+    assert app.ckb_plot.master is app.data_record_dropdown.master is app.card_data
+    assert app.ckb_plot.grid_info()["row"] == 0
+    assert app.record_label.grid_info()["row"] == 2
+    assert app.data_record_dropdown.grid_info()["row"] == 3
+    assert app.image_record_dropdown.grid_info()["row"] == 4
+    now = datetime(2026, 10, 2, 12)
+    record_positions = []
+    for mode, expected in (
+        ("min", ""), ("day", "2026-10-02"),
+        ("week", "2026-09-25 – 2026-10-02"),
+        ("month", "2026-09-02 – 2026-10-02"),
+        ("period", f"{date.today().isoformat()} – {date.today().isoformat()}"),
+    ):
+        app.plot_range_var.set(mode)
+        app._refresh_range_summary(now)
+        app.update_idletasks()
+        assert app.range_summary_var.get() == expected
+        assert app._date_range_frame.winfo_manager() == "grid"
+        record_positions.append(app.data_record_dropdown.winfo_y())
+    assert len(set(record_positions)) == 1
+    assert app.btn_period.winfo_manager() == "grid"
+    app.plot_range_var.set("min")
+    assert app.btn_period.winfo_manager() == ""
 
-    if app._date_entry_start is None:
-        pytest.skip("tkcalendar is unavailable")
+
+def test_period_draft_apply_cancel_and_reversed_dates(headless_app):
     from datetime import date
-    assert app._date_entry_start.get_date() == date.today()
-    assert app._date_entry_end.get_date() == date.today()
 
-    app._date_entry_start.set_date(date(2026, 10, 3))
-    app._on_period_date_selected("start")
-    assert app._date_entry_end.get_date() == date(2026, 10, 3)
-    app._date_entry_end.set_date(date(2026, 9, 28))
-    app._on_period_date_selected("end")
-    assert app._date_entry_start.get_date() == date(2026, 9, 28)
-
-    app.update_idletasks()
-    assert app.btn_period_start.winfo_reqwidth() >= 40
-    assert app.btn_period_end.winfo_reqwidth() >= 40
-    for entry in (app._date_entry_start, app._date_entry_end):
-        assert "downarrow" not in str(entry.style.layout(entry.cget("style"))).lower()
-        calendar = entry._calendar
-        for button in (calendar._l_month, calendar._r_month, calendar._l_year, calendar._r_year):
-            assert button.cget("width") == 3
-            assert int(entry.style.lookup(button.cget("style"), "arrowsize")) >= 24
-            assert int(button.pack_info()["ipadx"]) >= 12
-            assert int(button.pack_info()["ipady"]) >= 10
-
+    app = headless_app
+    original = (app.period_start, app.period_end)
+    app.plot_range_var.set("period")
+    app._open_period_picker()
+    picker = app._period_picker
+    assert str(picker.apply_button["state"]) == tk.DISABLED
+    picker.select_date(date(2026, 10, 3))
+    picker.select_date(date(2026, 9, 28))
+    assert (picker.draft_start, picker.draft_end) == (date(2026, 9, 28), date(2026, 10, 3))
+    assert (app.period_start, app.period_end) == original
+    picker.destroy()  # window-manager Cancel equivalent
+    assert (app.period_start, app.period_end) == original
+    app._open_period_picker()
+    picker = app._period_picker
+    picker.select_date(date(2026, 12, 31))
+    picker.select_date(date(2027, 1, 2))
+    with patch.object(app.plotter, "_render_current_mode") as redraw:
+        app.plotter.window = MagicMock()
+        picker.apply_button.invoke()
+        redraw.assert_called_once_with()
+        app.plotter.window = None
+    assert (app.period_start, app.period_end) == (date(2026, 12, 31), date(2027, 1, 2))
+    assert app.range_summary_var.get() == "2026-12-31 – 2027-01-02"
+    assert not picker.winfo_exists()
     app.plot_range_var.set("day")
-    assert app._date_range_frame.winfo_manager() == ""
+    app.plot_range_var.set("period")
+    assert app.period_start == date(2026, 12, 31)
+
+
+def test_period_same_day_clicks_and_restart(headless_app):
+    from datetime import date
+
+    app = headless_app
+    app.plot_range_var.set("period")
+    app._open_period_picker()
+    picker = app._period_picker
+    calendar = picker.calendar
+    # Exercise the actual day-label mouse binding twice, rather than only
+    # calling the range state method. tkcalendar must report repeated clicks.
+    app.update()
+    target = date.today()
+    label = next(label for row in calendar._calendar for label in row
+                 if str(label.cget("text")) == str(target.day)
+                 and "_om." not in str(label.cget("style")))
+    label.event_generate("<Button-1>")
+    app.update()
+    assert picker.draft_start == target and picker.draft_end is None
+    label.event_generate("<Button-1>")
+    app.update()
+    assert picker.draft_start == picker.draft_end == target
+    picker.select_date(date(2026, 11, 1))
+    assert picker.draft_end is None
+    assert str(picker.apply_button["state"]) == tk.DISABLED
+    picker.select_date(date(2026, 11, 1))
+    picker.apply_button.invoke()
+    assert app.period_start == app.period_end == date(2026, 11, 1)
+
+
+def test_period_mode_exit_escape_and_missing_calendar(headless_app, monkeypatch):
+    app = headless_app
+    original = (app.period_start, app.period_end)
+    app.plot_range_var.set("period")
+    app._open_period_picker()
+    picker = app._period_picker
+    picker.select_date(app.period_start)
+    picker.focus_force()
+    app.update()
+    picker.event_generate("<Escape>")
+    app.update()
+    assert not picker.winfo_exists()
+    assert (app.period_start, app.period_end) == original
+    app._open_period_picker()
+    picker = app._period_picker
+    app.plot_range_var.set("week")
+    assert not picker.winfo_exists()
+    monkeypatch.setattr(psc_mod, "Calendar", None)
+    app.plot_range_var.set("period")
+    assert str(app.btn_period["state"]) == tk.DISABLED
+    assert app.range_summary_var.get() == "Calendar unavailable"
+    app._open_period_picker()
+    assert app._period_picker is None
 
 
 def test_plot_mode_labels_and_window_manager_close(headless_app, tmp_path, monkeypatch):
@@ -277,12 +360,11 @@ def test_plot_mode_labels_and_window_manager_close(headless_app, tmp_path, monke
         assert title in app.plotter.window.title()
         assert app.plotter.fig.axes[2].xaxis.get_major_formatter().fmt == fmt
 
-    if app._date_entry_start is not None:
-        app._date_entry_start.set_date(date.today() - timedelta(days=1))
-        app._date_entry_end.set_date(date.today())
-        app.plot_range_var.set("period")
-        assert "Period" in app.plotter.window.title()
-        assert app.plotter.fig.axes[2].xaxis.get_major_formatter().fmt == "%Y-%m-%d"
+    app.period_start = date.today() - timedelta(days=1)
+    app.period_end = date.today()
+    app.plot_range_var.set("period")
+    assert "Period" in app.plotter.window.title()
+    assert app.plotter.fig.axes[2].xaxis.get_major_formatter().fmt == "%Y-%m-%d"
 
     close_command = app.plotter.window.protocol("WM_DELETE_WINDOW")
     app.tk.call(close_command)
