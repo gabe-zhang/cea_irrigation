@@ -272,7 +272,8 @@ def read_historical_telemetry(
     """Read telemetry CSV records for a live-relative or inclusive calendar range.
 
     Returns:
-        dict with keys: 'timestamps', 'moisture', 'soil_temp', 'air_temp', 'humidity', 'pump_volumes', 'pump_events'
+        dict with keys: 'timestamps', 'moisture', 'soil_temp', 'air_temp',
+        'humidity', 'light', 'pump_volumes', 'pump_events'
     """
     if now is None:
         now = datetime.now()
@@ -300,6 +301,7 @@ def read_historical_telemetry(
     soil_temps: list[float | None] = []
     air_temps: list[float | None] = []
     humidities: list[float | None] = []
+    light_levels: list[float | None] = []
     pump_volumes: list[list[float]] = [[], [], [], []]
     pump_events: list[dict] = []
 
@@ -310,12 +312,13 @@ def read_historical_telemetry(
             "soil_temp": soil_temps,
             "air_temp": air_temps,
             "humidity": humidities,
+            "light": light_levels,
             "pump_volumes": pump_volumes,
             "pump_events": pump_events,
         }
 
     csv_files = sorted(telemetry_dir.glob("telemetry_*.csv"))
-    rows: list[tuple[datetime, list[float | None], float | None, float | None, float | None, str]] = []
+    rows: list[tuple[datetime, list[float | None], float | None, float | None, float | None, float | None, str]] = []
 
     for fpath in csv_files:
         try:
@@ -347,21 +350,23 @@ def read_historical_telemetry(
                     st = _safe_float(row[9])
                     at = _safe_float(row[10])
                     rh = _safe_float(row[11])
+                    light = _safe_float(row[12]) if len(row) > 12 else None
                     relays_str = row[13].strip() if len(row) > 13 else "0000"
-                    rows.append((dt, [m1, m2, m3, m4], st, at, rh, relays_str))
+                    rows.append((dt, [m1, m2, m3, m4], st, at, rh, light, relays_str))
         except Exception as e:
             print(f"[Telemetry Reader] Error reading {fpath.name}: {e}")
 
     rows.sort(key=lambda x: x[0])
     active_runs: dict[int, dict] = {}
 
-    for idx, (dt, m_list, st, at, rh, r_str) in enumerate(rows):
+    for idx, (dt, m_list, st, at, rh, light, r_str) in enumerate(rows):
         timestamps.append(dt)
         for i in range(4):
             moistures[i].append(m_list[i])
         soil_temps.append(st)
         air_temps.append(at)
         humidities.append(rh)
+        light_levels.append(light)
 
         if idx > 0:
             dt_step = (dt - rows[idx - 1][0]).total_seconds()
@@ -410,6 +415,7 @@ def read_historical_telemetry(
         "soil_temp": soil_temps,
         "air_temp": air_temps,
         "humidity": humidities,
+        "light": light_levels,
         "pump_volumes": pump_volumes,
         "pump_events": pump_events,
     }
@@ -445,6 +451,7 @@ class PlotWindow:
         self.ydata_soil_temp: list[float] = []
         self.ydata_temp: list[float] = []
         self.ydata_rh: list[float] = []
+        self.ydata_light: list[float] = []
 
         self.fig = Figure(figsize=(15.0, 10.5), dpi=100)
         self.lines_moist = []
@@ -453,6 +460,7 @@ class PlotWindow:
         self.line_temp = None
         self.line_soil_temp = None
         self.line_rh = None
+        self.line_light = None
         self.ax_moist = None
         self.ax_vol = None
         self.ax_temp = None
@@ -717,6 +725,7 @@ class PlotWindow:
             self.ydata_soil_temp.clear()
             self.ydata_temp.clear()
             self.ydata_rh.clear()
+            self.ydata_light.clear()
 
             self._init_live_figure()
             if self.canvas_widget:
@@ -744,6 +753,7 @@ class PlotWindow:
             self._render_current_mode()
 
     def _update(self, data: tuple):
+        light = data[5] if len(data) >= 6 else None
         if len(data) >= 5:
             x, moistures, soil_temp, temp, rh = data[:5]
         elif len(data) == 4:
@@ -761,6 +771,7 @@ class PlotWindow:
             self.ydata_soil_temp = [soil_temp if soil_temp is not None else np.nan]
             self.ydata_temp = [temp if temp is not None else np.nan]
             self.ydata_rh = [rh if rh is not None else np.nan]
+            self.ydata_light = [light if light is not None else np.nan]
         else:
             self.xdata.append(x)
             for i in range(self.max_ch):
@@ -769,6 +780,7 @@ class PlotWindow:
             self.ydata_soil_temp.append(soil_temp if soil_temp is not None else np.nan)
             self.ydata_temp.append(temp if temp is not None else np.nan)
             self.ydata_rh.append(rh if rh is not None else np.nan)
+            self.ydata_light.append(light if light is not None else np.nan)
 
         for i in range(self.max_ch):
             if i < len(self.lines_moist):
@@ -780,8 +792,11 @@ class PlotWindow:
             self.line_soil_temp.set_data(self.xdata, self.ydata_soil_temp)
         if self.line_rh:
             self.line_rh.set_data(self.xdata, self.ydata_rh)
+        if self.line_light:
+            self.line_light.set_data(self.xdata, self.ydata_light)
 
-        return tuple(self.lines_moist) + (self.line_temp, self.line_soil_temp, self.line_rh)
+        artists = tuple(self.lines_moist) + (self.line_temp, self.line_soil_temp, self.line_rh)
+        return artists + (self.line_light,) if self.line_light is not None else artists
 
     def _gen(self):
         t0 = time.time()
@@ -796,13 +811,16 @@ class PlotWindow:
                 soil_temp = raw_data.get("soil_temp")
                 temp = raw_data.get("temp")
                 rh = raw_data.get("humidity")
+                light = raw_data.get("light")
             elif isinstance(raw_data, (list, tuple)):
                 moistures = list(raw_data)
                 soil_temp, temp, rh = None, None, None
+                light = None
             else:
                 moistures, soil_temp, temp, rh = [], None, None, None
+                light = None
 
-            yield round(elapsed, 1), moistures, soil_temp, temp, rh
+            yield round(elapsed, 1), moistures, soil_temp, temp, rh, light
             time.sleep(0.5)
 
     def toggle(self, show: bool, on_close=None) -> None:
