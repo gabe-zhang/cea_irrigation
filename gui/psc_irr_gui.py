@@ -1261,30 +1261,30 @@ class MainWindow(tk.Tk):
             selectcolor="#b0bec5", bd=3, indicatoron=False, variable=self.plot_var,
             command=lambda: self.plotter.toggle(bool(self.plot_var.get()), lambda: self.plot_var.set(0)),
         )
-        self.ckb_plot.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=4, ipady=10)
+        self.ckb_plot.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=2)
         range_box = tk.Frame(self.card_data, bg="white")
-        range_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=4)
+        range_box.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=2)
         tk.Label(range_box, text="Range:", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(side=tk.LEFT, padx=(4, 2))
         self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day", "week", "month", "period")
         self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=7, pady=3)
         self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
         self.plot_range_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self._date_range_frame = tk.Frame(self.card_data, bg="white", height=48)
+        self._date_range_frame = tk.Frame(self.card_data, bg="white", height=32)
         self._date_range_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6)
         self._date_range_frame.grid_propagate(False)
         self._date_range_frame.grid_columnconfigure(0, weight=1)
         self._date_range_frame.grid_rowconfigure(0, weight=1)
         self.range_summary_label = tk.Label(
             self._date_range_frame, textvariable=self.range_summary_var,
-            font=("arial", 12), bg="white", anchor="w",
+            font=("arial", 12, "bold"), bg="white", anchor="w",
         )
         self.range_summary_label.grid(row=0, column=0, sticky="ew", padx=(4, 2))
         self.btn_period = tk.Button(
             self._date_range_frame, text="Select period", font=("arial", 12, "bold"),
-            command=self._open_period_picker, pady=6,
+            command=self._open_period_picker, pady=2,
         )
-        self.btn_period.grid(row=0, column=1, padx=(2, 0), pady=4)
+        self.btn_period.grid(row=0, column=1, padx=(2, 0))
         self.record_label = tk.Label(self.card_data, text="Record", font=("arial", 16, "bold"), bg="white")
         self.record_label.grid(row=2, column=0, rowspan=2, sticky="nw", padx=10, pady=8)
         self.data_record_frame = tk.Frame(self.card_data, bg="white")
