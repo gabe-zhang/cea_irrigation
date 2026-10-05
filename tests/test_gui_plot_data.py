@@ -61,15 +61,29 @@ def test_live_light_legacy_tuples_and_sweep_reset(plotter):
 def assert_sensor_axes(plotter):
     assert plotter.ax_temp.get_ylim() == (0, 100)
     assert plotter.ax_temp.get_ylabel() == "Air T/RH, °C/%"
-    assert plotter.ax_light.get_ylim() == (0, 3000)
+    assert plotter.ax_light.get_ylim() == (0, 4000)
     assert plotter.ax_light.get_ylabel() == "Light, Lux"
     assert plotter.line_rh.axes is plotter.ax_temp
     assert plotter.line_light.axes is plotter.ax_light
-    assert plotter.line_light.get_color() == gui.DARK_YELLOW
+    assert plotter.line_light.get_color() == gui.LIGHT_COLOR
     for artist in (*plotter.lines_moist, plotter.line_temp,
                    plotter.line_soil_temp, plotter.line_rh, plotter.line_light):
         assert artist.get_linestyle() == "None"
         assert artist.get_marker() == "o"
+    assert plotter.ax_light.yaxis.label.get_color() == gui.LIGHT_COLOR
+    assert all(t.get_color() == gui.LIGHT_COLOR for t in plotter.ax_light.get_yticklabels())
+    for axis, sensors in ((plotter.ax_temp, (plotter.line_temp, plotter.line_soil_temp,
+                                           plotter.line_rh, plotter.line_light)),
+                          (plotter.ax_moist, plotter.lines_moist)):
+        legend = axis.get_legend()
+        assert legend.handlelength == 2
+        assert all(t.get_fontsize() == 18 for t in legend.get_texts())
+        for handle, sensor in zip(legend.legend_handles, sensors):
+            assert handle is not sensor
+            assert handle.get_color() == sensor.get_color()
+            assert handle.get_linestyle() == "-"
+            assert handle.get_marker() == "None"
+            assert handle.get_linewidth() == 3
     assert plotter.line_setpoint.get_linestyle() == "--"
     assert plotter.line_stop.get_linestyle() == "--"
 

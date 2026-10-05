@@ -50,6 +50,7 @@ import matplotlib.animation as animation
 import matplotlib.dates as mdates
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 import numpy as np
 from PIL import Image, ImageTk
 import serial
@@ -63,7 +64,12 @@ except (ImportError, ModuleNotFoundError):
     from modules.plant_ai import PlantAIDetector
 
 # Plot styling
+AIR_TEMP_COLOR = "#d62728"
+SOIL_TEMP_COLOR = "#d95f02"
+HUMIDITY_COLOR = "#00838f"
+LIGHT_COLOR = "#FFD700"
 DARK_YELLOW = "#B8860B"
+LIGHT_AXIS_MAX_LUX = 4000
 SENSOR_DOTS = {"marker": "o", "linestyle": "None", "markersize": 4}
 
 # Constants & Soil Calibration
@@ -96,6 +102,12 @@ GIMBAL_STEP = 5  # degrees per nudge click
 # Interval mapping
 DATA_INTERVAL_MAP = {"10s": 10_000, "1min": 60_000, "1hr": 3_600_000}
 IMAGE_INTERVAL_MAP = {"1sec": 1_000, "1min": 60_000, "1hr": 3_600_000, "1day": 86_400_000}
+
+
+def legend_strokes(artists):
+    """Keep legend samples readable independently of sensor dot sizes."""
+    return [Line2D([], [], color=a.get_color(), label=a.get_label(),
+                   linestyle="-", marker="None", linewidth=3) for a in artists]
 
 
 def parse_interval_to_ms(val: str, default_ms: int = 10_000) -> int:
@@ -600,10 +612,10 @@ class PlotWindow:
         self.ax_light = self.ax_temp.twinx()
         artists = []
         for axis, values, color, label in (
-            (self.ax_temp, air_temp, "#d62728", "Air temp, °C"),
-            (self.ax_temp, soil_temp, "#d95f02", "Soil temp, °C"),
-            (self.ax_temp, rh, "#00838f", "RH, %"),
-            (self.ax_light, light, DARK_YELLOW, "Light, Lux"),
+            (self.ax_temp, air_temp, AIR_TEMP_COLOR, "Air temp, °C"),
+            (self.ax_temp, soil_temp, SOIL_TEMP_COLOR, "Soil temp, °C"),
+            (self.ax_temp, rh, HUMIDITY_COLOR, "RH, %"),
+            (self.ax_light, light, LIGHT_COLOR, "Light, Lux"),
         ):
             y = [v if v is not None else np.nan for v in values]
             (artist,) = axis.plot(x, y, color=color, label=label,
@@ -614,12 +626,12 @@ class PlotWindow:
         self.ax_temp.set_ylabel("Air T/RH, °C/%", fontsize=20, fontweight="bold")
         self.ax_temp.tick_params(axis="both", labelsize=tick_size)
         self.ax_temp.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
-        self.ax_light.set_ylim(0, 3000)
-        self.ax_light.set_ylabel("Light, Lux", fontsize=20, fontweight="bold", color=DARK_YELLOW)
-        self.ax_light.tick_params(axis="y", labelcolor=DARK_YELLOW, labelsize=tick_size)
+        self.ax_light.set_ylim(0, LIGHT_AXIS_MAX_LUX)
+        self.ax_light.set_ylabel("Light, Lux", fontsize=20, fontweight="bold", color=LIGHT_COLOR)
+        self.ax_light.tick_params(axis="y", labelcolor=LIGHT_COLOR, labelsize=tick_size)
         self.ax_temp.legend(
-            artists, [a.get_label() for a in artists], loc="lower right",
-            fontsize=16, ncol=2, framealpha=0.92,
+            legend_strokes(artists), [a.get_label() for a in artists], loc="lower right",
+            fontsize=18, ncol=2, framealpha=0.92, handlelength=2,
         )
 
     def _init_live_figure(self) -> None:
@@ -654,7 +666,8 @@ class PlotWindow:
         self.ax_moist.set_ylabel("Soil moisture, %", fontsize=20, fontweight="bold")
         self.ax_moist.tick_params(axis="both", labelsize=18)
         self.ax_moist.grid(True, linestyle="--", alpha=0.6, linewidth=1.5)
-        self.ax_moist.legend(loc="lower right", fontsize=18, ncol=4, framealpha=0.92)
+        self.ax_moist.legend(handles=legend_strokes(self.lines_moist), loc="lower right",
+                             fontsize=18, ncol=4, framealpha=0.92, handlelength=2)
 
         self.fig.tight_layout(rect=[0.02, 0.04, 0.98, 0.95])
         self.fig.subplots_adjust(hspace=0.35)
@@ -782,8 +795,9 @@ class PlotWindow:
         ax_moist.set_xlabel(xlabel, fontsize=18, fontweight="bold")
 
         ax_moist.legend(
+            handles=legend_strokes(self.lines_moist), handlelength=2,
             loc="lower right",
-            fontsize=16,
+            fontsize=18,
             ncol=4,
             framealpha=0.92,
         )
