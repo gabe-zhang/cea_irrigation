@@ -1,7 +1,10 @@
 """Picamera2 camera wrapper for Raspberry Pi."""
 
 from __future__ import annotations
+import logging
 import numpy as np
+
+logger = logging.getLogger("cea_irrigation.camera")
 
 try:
     from picamera2 import Picamera2
@@ -15,6 +18,7 @@ class Camera:
     def __init__(self, width: int = 1536, height: int = 864) -> None:
         self.picam2: Picamera2 | None = None
         if Picamera2 is None:
+            logger.warning("Picamera2 is unavailable; camera inactive", extra={"event": "camera.unavailable"})
             return
 
         try:
@@ -24,8 +28,9 @@ class Camera:
             self.picam2.preview_configuration.align()
             self.picam2.configure("preview")
             self.picam2.start()
-        except Exception as e:
-            print(f"[Camera] Camera initialization error: {e}")
+            logger.info("Camera started", extra={"event": "camera.started", "context": {"width": width, "height": height}})
+        except Exception:
+            logger.exception("Camera initialization failed", extra={"event": "camera.init_failed"})
             self.picam2 = None
 
     @property
@@ -36,8 +41,8 @@ class Camera:
         """Capture and return the current frame as a numpy array."""
         try:
             return self.picam2.capture_array() if self.picam2 else None
-        except Exception as e:
-            print(f"[Camera] Capture error: {e}")
+        except Exception:
+            logger.exception("Camera capture failed", extra={"event": "camera.capture_failed", "rate_limit": True})
             return None
 
     def stop(self) -> None:
@@ -45,8 +50,9 @@ class Camera:
         if self.picam2:
             try:
                 self.picam2.stop()
+                logger.info("Camera stopped", extra={"event": "camera.stopped"})
             except Exception:
-                pass
+                logger.exception("Camera stop failed", extra={"event": "camera.stop_failed"})
             finally:
                 self.picam2 = None
 

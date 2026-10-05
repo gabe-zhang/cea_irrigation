@@ -20,12 +20,20 @@ Usage:
 """
 
 import argparse
+import logging
 import sys
 import threading
 import time
 from datetime import datetime
 import serial
 import serial.tools.list_ports
+
+if __package__:
+    from scripts.logging_config import configure_logging, install_exception_hooks
+else:
+    from logging_config import configure_logging, install_exception_hooks
+
+logger = logging.getLogger("cea_irrigation.controller")
 
 # Hardware safety bounds
 PAN_MIN, PAN_MAX = 0, 130
@@ -243,12 +251,19 @@ def read_fresh_telemetry(ser: serial.Serial, timeout_sec: float = 3.0) -> dict |
 
 def send_command(ser: serial.Serial, cmd: str) -> bool:
     """Send a command line to Arduino and flush write buffer."""
+    command = cmd.strip()
+    is_bitmask = bool(command) and all(c in "01" for c in command)
     try:
         ser.write((cmd.strip() + "\n").encode("utf-8"))
         ser.flush()
+        logger.log(logging.INFO if is_bitmask else logging.DEBUG,
+                   "Serial command written (awaiting device confirmation)",
+                   extra={"event": "serial.command_sent", "context": {"command": cmd.strip()}})
         return True
-    except Exception as e:
-        print(f"[Serial Write Error] {e}")
+    except Exception:
+        logger.log(logging.CRITICAL if is_bitmask and "1" not in command else logging.ERROR,
+                   "Serial command failed", exc_info=True,
+                   extra={"event": "serial.write_failed", "context": {"command": command}})
         return False
 
 
@@ -258,6 +273,8 @@ def main():
     parser.add_argument("-b", "--baud", type=int, default=9600, help="Baud rate (default: 9600)")
     parser.add_argument("-l", "--list", action="store_true", help="List available serial ports and exit")
     args = parser.parse_args()
+    configure_logging("controller")
+    install_exception_hooks()
 
     if args.list:
         list_ports()
@@ -265,25 +282,29 @@ def main():
 
     port = args.port or find_arduino_port()
     if not port:
-        print("[Error] No serial port detected. Please specify one with `--port`.")
+        logger.error("No serial port detected. Specify one with --port", extra={"event": "serial.not_found"})
         list_ports()
         sys.exit(1)
 
     print(f"Connecting to Arduino on {port} at {args.baud} baud...")
+    logger.info("Opening serial connection", extra={"event": "serial.connecting", "context": {"port": port, "baud": args.baud}})
     try:
         ser = serial.Serial(port=port, baudrate=args.baud, timeout=1.0)
         time.sleep(2.0)  # Wait for Arduino DTR reset
         ser.reset_input_buffer()
-    except serial.SerialException as e:
-        print(f"[Error] Failed to open {port}: {e}")
+    except serial.SerialException:
+        logger.exception("Cannot open serial connection", extra={"event": "serial.connection_failed", "context": {"port": port}})
         print("Tip: Make sure the Arduino IDE Serial Monitor or other terminals are closed.")
         return
+
+    logger.info("Serial connection opened", extra={"event": "serial.connected", "context": {"port": port, "baud": args.baud}})
 
     print("Fetching initial telemetry...")
     initial_data = read_fresh_telemetry(ser, timeout_sec=4.0)
     if initial_data:
         print(f"--> Connected! Initial Reading:\n    {format_telemetry_compact(initial_data)}")
     else:
+        logger.warning("Initial telemetry timed out", extra={"event": "telemetry.initial_timeout", "context": {"timeout_sec": 4}})
         print("--> Connected! (Waiting for periodic telemetry broadcast...)")
 
     print("=" * 68)
@@ -299,6 +320,7 @@ def main():
     stop_event = threading.Event()
 
     def background_listener():
+        previous_relays = initial_data.get("relays") if initial_data else None
         while not stop_event.is_set():
             try:
                 if ser.in_waiting:
@@ -307,16 +329,26 @@ def main():
                         line_str = line_bytes.decode("utf-8", errors="replace").strip()
                         data = parse_telemetry_line(line_str)
                         if data is not None:
+                            if data.get("relays") != previous_relays:
+                                logger.info("Device reported relay state", extra={"event": "serial.relay_state", "context": {
+                                    "previous": previous_relays, "relays": data.get("relays"),
+                                }})
+                                previous_relays = data.get("relays")
+                            logger.debug("Telemetry received", extra={"event": "telemetry.received", "context": data})
                             print(f"\n{format_telemetry_compact(data)}\n> ", end="", flush=True)
                         elif line_str:
+                            logger.log(logging.ERROR if line_str.lower().startswith("err:") else logging.DEBUG,
+                                       "Arduino message", extra={"event": "serial.device_message", "context": {"message": line_str[:512]}})
                             # Print ACKs, headers, and status messages cleanly
                             print(f"\n[Arduino] {line_str}\n> ", end="", flush=True)
                 else:
                     time.sleep(0.05)
             except Exception:
+                if not stop_event.is_set():
+                    logger.exception("Serial listener stopped unexpectedly", extra={"event": "serial.reader_failed"})
                 break
 
-    listener_thread = threading.Thread(target=background_listener, daemon=True)
+    listener_thread = threading.Thread(target=background_listener, name="serial-reader", daemon=True)
     listener_thread.start()
 
     try:
@@ -385,13 +417,16 @@ def main():
             send_command(ser, "h")
             time.sleep(0.2)
         except Exception:
-            pass
+            logger.exception("Shutdown commands failed", extra={"event": "shutdown.command_failed"})
     finally:
+        logger.info("Stopping controller", extra={"event": "application.stopping"})
         stop_event.set()
         try:
             ser.close()
         except Exception:
-            pass
+            logger.exception("Cannot close serial connection", extra={"event": "serial.close_failed"})
+        listener_thread.join(timeout=2.0)
+        logger.info("Controller stopped", extra={"event": "application.stopped"})
         print("Serial connection closed. Exited cleanly.")
 
 

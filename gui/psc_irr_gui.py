@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import signal
@@ -29,6 +30,13 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, ttk
+
+# Preserve the supported direct-script launch alongside python -m gui.psc_irr_gui.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.logging_config import configure_logging, install_exception_hooks
+
+logger = logging.getLogger("cea_irrigation.gui")
 try:
     from tkcalendar import Calendar
 except ImportError:
@@ -434,8 +442,8 @@ def read_historical_telemetry(
                     light = _safe_float(row[12]) if len(row) > 12 else None
                     relays_str = row[13].strip() if len(row) > 13 else "0000"
                     rows.append((dt, [m1, m2, m3, m4], st, at, rh, light, relays_str))
-        except Exception as e:
-            print(f"[Telemetry Reader] Error reading {fpath.name}: {e}")
+        except Exception:
+            logger.exception("Cannot read telemetry history", extra={"event": "telemetry.history_read_failed", "context": {"path": fpath}})
 
     rows.sort(key=lambda x: x[0])
     active_runs: dict[int, dict] = {}
@@ -1139,6 +1147,7 @@ class MainWindow(tk.Tk):
         # Send full updated bitmask with this relay cleared
         mask = "".join(str(v.get()) for v in self.water_vars)
         self.send_bitmask(mask)
+        logger.info("Manual watering timer expired", extra={"event": "watering.manual_stopped", "context": {"channel": idx + 1, "reason": "duration_elapsed"}})
 
     def _build_sidebar_cards(self) -> None:
         # Card 1: IRRIGATION
@@ -1508,8 +1517,8 @@ class MainWindow(tk.Tk):
             if not self._auto_watering_active:
                 moist = self.telemetry.get("moisture_pct", [])
                 self._log_telemetry_csv(self.telemetry, moist)
-        except Exception as e:
-            print(f"[Periodic Data Logger] Error: {e}")
+        except Exception:
+            logger.exception("Periodic telemetry recording failed", extra={"event": "telemetry.periodic_write_failed", "rate_limit": True})
         finally:
             interval_ms = parse_interval_to_ms(self.data_record_var.get(), default_ms=10_000)
             self._data_logger_job = self.after(interval_ms, self._periodic_data_logger)
@@ -1520,10 +1529,9 @@ class MainWindow(tk.Tk):
                 clean_frame = self.camera.capture_array()
                 if clean_frame is not None:
                     img_path = IMAGES_DIR / f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                    cv2.imwrite(str(img_path), clean_frame)
-                    print(f"[Periodic Image Logger] Saved clean frame to {img_path}")
-        except Exception as e:
-            print(f"[Periodic Image Logger] Error: {e}")
+                    self._save_image(img_path, clean_frame)
+        except Exception:
+            logger.exception("Periodic image recording failed", extra={"event": "image.periodic_write_failed", "rate_limit": True})
         finally:
             interval_ms = parse_interval_to_ms(self.image_record_var.get(), default_ms=3_600_000)
             self._image_logger_job = self.after(interval_ms, self._periodic_image_logger)
@@ -1549,9 +1557,9 @@ class MainWindow(tk.Tk):
                 for ch in range(len(self.water_vars))
             ]
             self._start_auto_watering()
-        except Exception as e:
+        except Exception:
             self._below_threshold_counts = [0] * len(self.water_vars)
-            print(f"[Auto Ticker] Error: {e}")
+            logger.exception("Automatic watering check failed", extra={"event": "watering.check_failed", "rate_limit": True})
         finally:
             self._start_auto_ticker()
 
@@ -1596,9 +1604,15 @@ class MainWindow(tk.Tk):
             self._auto_monitor_job = self.after(AUTO_CHECK_INTERVAL_MS, self._auto_watering_monitor)
             self._apply_auto_channels()
             self._log_watering_telemetry()
-            print(f"[Auto/{self._auto_off_method}] Started channels {[c+1 for c in active_channels]}.")
+            logger.info("Automatic watering requested", extra={"event": "watering.auto_started", "context": {
+                "run_id": run_stamp, "channels": [c + 1 for c in active_channels],
+                "off_method": self._auto_off_method, "duration_sec": self._auto_duration_sec,
+                "start_threshold_pct": setpoint, "stop_threshold_pct": self.soil_water_stop_setpoint.get(),
+                "moisture_pct": moistures, "safety_timeout_sec": MAX_WATERING_SEC,
+            }})
         except Exception:
-            self._finish_auto_watering()
+            logger.exception("Automatic watering startup failed", extra={"event": "watering.start_failed"})
+            self._finish_auto_watering(reason="startup_failed")
             raise
 
     def _apply_auto_channels(self) -> None:
@@ -1610,9 +1624,16 @@ class MainWindow(tk.Tk):
             var.set(1 if i in self._auto_channels_active else 0)
         self.send_bitmask(mask)
 
-    def _finish_auto_watering(self) -> None:
+    def _finish_auto_watering(self, reason: str = "duration_elapsed") -> None:
         """Stop pumps and cancel every callback owned by this watering run."""
         was_active = self._auto_watering_active
+        stop_context = None
+        if was_active:
+            stop_context = {
+                "run_id": self._auto_run_dir.name if self._auto_run_dir else None,
+                "reason": reason, "channels": [c + 1 for c in self._auto_channels_active],
+                "elapsed_sec": round(time.monotonic() - self._auto_start_time, 3) if self._auto_start_time is not None else None,
+            }
         self._auto_watering_active = False
         self._auto_channels_active = []
         self._auto_start_time = None
@@ -1630,13 +1651,14 @@ class MainWindow(tk.Tk):
                 except (tk.TclError, ValueError):
                     pass
         if was_active:
+            logger.info("Automatic watering stop requested", extra={"event": "watering.auto_stopped", "context": stop_context})
             self._log_watering_telemetry()
 
     def _auto_safety_stop(self) -> None:
         self._auto_safety_job = None
         if self._auto_watering_active:
-            print(f"[Auto] Hard safety stop at {MAX_WATERING_SEC}s.")
-            self._finish_auto_watering()
+            logger.warning("Hard watering safety timeout reached", extra={"event": "watering.safety_stop", "context": {"timeout_sec": MAX_WATERING_SEC}})
+            self._finish_auto_watering(reason="safety_timeout")
 
     def _auto_watering_monitor(self) -> None:
         self._auto_monitor_job = None
@@ -1650,8 +1672,11 @@ class MainWindow(tk.Tk):
             return
         try:
             elapsed = time.monotonic() - self._auto_start_time
-            if not self.auto_var.get() or elapsed >= MAX_WATERING_SEC:
-                self._finish_auto_watering()
+            if not self.auto_var.get():
+                self._finish_auto_watering(reason="mode_changed")
+                return
+            if elapsed >= MAX_WATERING_SEC:
+                self._auto_safety_stop()
                 return
             if self._auto_off_method == "Time":
                 if elapsed >= self._auto_duration_sec:
@@ -1660,18 +1685,27 @@ class MainWindow(tk.Tk):
             else:
                 stop_target = float(self.soil_water_stop_setpoint.get())
                 moistures = self.telemetry.get("moisture_pct", [])
+                previous_channels = self._auto_channels_active
                 self._auto_channels_active = [
                     ch for ch in self._auto_channels_active
                     if ch < len(moistures) and moistures[ch] is not None
                     and moistures[ch] < stop_target
                 ]
+                for ch in previous_channels:
+                    if ch not in self._auto_channels_active:
+                        moisture = moistures[ch] if ch < len(moistures) else None
+                        logger.info("Channel watering stop requested", extra={"event": "watering.channel_stopped", "context": {
+                            "run_id": self._auto_run_dir.name if self._auto_run_dir else None,
+                            "channel": ch + 1, "reason": "sensor_missing" if moisture is None else "moisture_target_reached",
+                            "moisture_pct": moisture, "stop_threshold_pct": stop_target,
+                        }})
                 if not self._auto_channels_active:
-                    self._finish_auto_watering()
+                    self._finish_auto_watering(reason="channels_finished")
                     return
             self._apply_auto_channels()
-        except Exception as e:
-            print(f"[Auto] Control error; stopping pumps: {e}")
-            self._finish_auto_watering()
+        except Exception:
+            logger.exception("Automatic watering control failed; requesting pump stop", extra={"event": "watering.control_failed"})
+            self._finish_auto_watering(reason="control_failed")
 
     def _log_watering_telemetry(self) -> None:
         data = {**self.telemetry, "relays": "".join(str(var.get()) for var in self.water_vars)}
@@ -1683,9 +1717,16 @@ class MainWindow(tk.Tk):
                 clean_frame = self.camera.capture_array()
                 if clean_frame is not None:
                     img_name = f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-                    cv2.imwrite(str(run_dir / img_name), clean_frame)
-            except Exception as e:
-                print(f"[Watering Record] Image capture error: {e}")
+                    self._save_image(run_dir / img_name, clean_frame)
+            except Exception:
+                logger.exception("Watering image recording failed", extra={"event": "image.watering_write_failed", "context": {"run_id": run_dir.name}, "rate_limit": True})
+
+    def _save_image(self, path: Path, frame: np.ndarray) -> None:
+        """OpenCV reports some write failures as False rather than exceptions."""
+        if not cv2.imwrite(str(path), frame):
+            logger.error("Image write failed", extra={"event": "image.write_failed", "context": {"path": path}, "rate_limit": True})
+            return
+        logger.debug("Image saved", extra={"event": "image.saved", "context": {"path": path}})
 
     def _bind_capture_click_hold(self) -> None:
         def on_press(event=None):
@@ -1734,6 +1775,7 @@ class MainWindow(tk.Tk):
 
     def _on_auto_toggle(self) -> None:
         is_auto = bool(self.auto_var.get())
+        logger.info("Irrigation mode changed", extra={"event": "watering.mode_changed", "context": {"mode": "auto" if is_auto else "manual"}})
         self.ckb_auto.config(text="AUTO" if is_auto else "MANUAL")
         if is_auto:
             self.ckb_auto.grid()
@@ -1751,7 +1793,7 @@ class MainWindow(tk.Tk):
             b.config(state=state, disabledforeground="#9e9e9e")
         # Stop any existing run on either mode transition. Old callbacks must
         # never re-energize pumps after the user has switched to MANUAL.
-        self._finish_auto_watering()
+        self._finish_auto_watering(reason="mode_changed")
         for i, job in enumerate(self._relay_timers):
             if job is not None:
                 self.after_cancel(job)
@@ -1801,6 +1843,10 @@ class MainWindow(tk.Tk):
         if relay_idx is not None:
             # One-shot timed run for this relay
             is_on = bool(self.water_vars[relay_idx].get())
+            logger.info("Manual relay toggle requested", extra={"event": "watering.manual_requested", "context": {
+                "channel": relay_idx + 1, "enabled": is_on,
+                "duration_sec": max(1, min(MAX_WATERING_SEC, self.pump_duration_var.get())),
+            }})
             if is_on:
                 # Cancel any existing timer for this relay first
                 if relay_idx < len(self._relay_timers) and self._relay_timers[relay_idx] is not None:
@@ -1834,13 +1880,26 @@ class MainWindow(tk.Tk):
         self.send_command(bitmask)
 
     def send_command(self, cmd: str) -> None:
+        command = cmd.strip()
+        is_bitmask = bool(command) and all(c in "01" for c in command)
+        is_stop = is_bitmask and "1" not in command
         if self.ser and self.ser.is_open:
             try:
                 with self.serial_lock:
                     self.ser.write((cmd.strip() + "\n").encode("utf-8"))
                     self.ser.flush()
-            except Exception as e:
-                print(f"[Serial] Command error: {e}")
+                changed = is_bitmask and command != getattr(self, "_last_logged_bitmask", None)
+                logger.log(logging.INFO if changed else logging.DEBUG,
+                           "Serial command written (awaiting device confirmation)",
+                           extra={"event": "serial.command_sent", "context": {"command": command}})
+                if is_bitmask:
+                    self._last_logged_bitmask = command
+            except Exception:
+                logger.log(logging.CRITICAL if is_stop else logging.ERROR, "Serial command failed", exc_info=True,
+                           extra={"event": "serial.write_failed", "context": {"command": command}, "rate_limit": True})
+        else:
+            logger.log(logging.CRITICAL if is_stop else logging.WARNING, "Cannot send command; serial connection unavailable",
+                       extra={"event": "serial.command_unavailable", "context": {"command": command}, "rate_limit": True})
 
     def _start_repeat(self, action_fn) -> None:
         """Execute action immediately, then schedule repeated execution while held."""
@@ -1884,16 +1943,16 @@ class MainWindow(tk.Tk):
     def _init_serial(self) -> None:
         port = find_arduino_port()
         if not port:
-            print("[Serial] No Arduino detected.")
+            logger.warning("No Arduino detected", extra={"event": "serial.not_found"})
             return
         try:
             self.ser = serial.Serial(port=port, baudrate=BAUDRATE, timeout=1.0)
             time.sleep(2.0)
             self.ser.reset_input_buffer()
-            print(f"[Serial] Connected on {port}!")
-            threading.Thread(target=self._serial_reader, daemon=True).start()
-        except Exception as e:
-            print(f"[Serial] Error opening {port}: {e}")
+            logger.info("Serial connection opened", extra={"event": "serial.connected", "context": {"port": port, "baud": BAUDRATE}})
+            threading.Thread(target=self._serial_reader, name="serial-reader", daemon=True).start()
+        except Exception:
+            logger.exception("Cannot open serial connection", extra={"event": "serial.connection_failed", "context": {"port": port}})
 
     def _update_telemetry_ui(self, data: dict, moist: list[float | None]) -> None:
         st, at, ah, lv = data.get("soil_temp"), data.get("temp"), data.get("humidity"), data.get("light")
@@ -1916,6 +1975,11 @@ class MainWindow(tk.Tk):
         if self.stop_threads.is_set():
             return
         self.telemetry = {**data, "moisture_pct": moist}
+        previous_relays = getattr(self, "_last_observed_relays", None)
+        if data.get("relays") != previous_relays:
+            logger.info("Device reported relay state", extra={"event": "serial.relay_state", "context": {"previous": previous_relays, "relays": data.get("relays")}})
+            self._last_observed_relays = data.get("relays")
+        logger.debug("Telemetry received", extra={"event": "telemetry.received", "context": self.telemetry})
         self._telemetry_sequence += 1
         soil = data.get("soil", [])
         if soil and len(soil) != len(self.water_vars):
@@ -1963,11 +2027,12 @@ class MainWindow(tk.Tk):
                     st, at, ah, lv, data.get("relays", "0000"), str(data.get("pan", PAN_HOME)), str(data.get("tilt", TILT_HOME))
                 ]
                 f.write(",".join(row) + "\n")
-        except Exception as e:
-            print(f"[Telemetry Logger] Error: {e}")
+        except Exception:
+            logger.exception("Cannot write telemetry CSV", extra={"event": "telemetry.write_failed", "context": {"directory": TELEMETRY_DIR}, "rate_limit": True})
 
     def _serial_reader(self) -> None:
         rx_buf = ""
+        failed = False
         while not self.stop_threads.is_set():
             if self.ser and self.ser.is_open:
                 try:
@@ -1984,10 +2049,21 @@ class MainWindow(tk.Tk):
                                 soil = data.get("soil", [])
                                 moist = [raw_to_moisture(v, i) for i, v in enumerate(soil)]
                                 self.after(0, lambda d=data, m=moist: self._receive_telemetry(d, m))
+                            else:
+                                logger.log(logging.ERROR if line.lower().startswith("err:") else logging.DEBUG,
+                                           "Arduino message", extra={"event": "serial.device_message", "context": {"message": line[:512]}, "rate_limit": True})
+                        if failed:
+                            logger.info("Serial reads recovered", extra={"event": "serial.reader_recovered"})
+                            failed = False
                     else:
                         time.sleep(0.05)
                 except Exception:
+                    if not self.stop_threads.is_set():
+                        logger.exception("Serial read failed", extra={"event": "serial.reader_failed", "rate_limit": True})
+                        failed = True
                     time.sleep(0.1)
+            else:
+                self.stop_threads.wait(0.1)
 
     def _apply_plant_ai_overlays(self, frame: np.ndarray) -> tuple[np.ndarray, float | None]:
         pai = bool(self.plant_ai_var.get())
@@ -2025,8 +2101,8 @@ class MainWindow(tk.Tk):
                 if self.flag_capture:
                     # Guarantees saving clean raw camera frame without overlays
                     out = IMAGES_DIR / f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                    cv2.imwrite(str(out), frame)
-                    print(f"[Capture] Saved clean snapshot to {out}")
+                    self._save_image(out, frame)
+                    logger.info("Snapshot requested", extra={"event": "image.snapshot_requested", "context": {"path": out}})
                     self.flag_capture = False
         self.after(30, self._camera_loop)
 
@@ -2102,6 +2178,8 @@ class MainWindow(tk.Tk):
         if issubclass(exc, KeyboardInterrupt):
             self.on_closing()
         else:
+            logger.critical("Unhandled GUI callback exception", exc_info=(exc, val, tb),
+                            extra={"event": "gui.callback_failed"})
             super().report_callback_exception(exc, val, tb)
 
     def on_closing(self) -> None:
@@ -2127,31 +2205,34 @@ class MainWindow(tk.Tk):
                 except Exception:
                     pass
 
-        print("\nShutting down GUI and all pumps...")
+        logger.info("Stopping GUI and requesting all pumps off", extra={"event": "application.stopping"})
         self.stop_threads.set()
         try:
             self.send_bitmask("0" * max(1, len(self.water_vars)))
             self.send_command("h")  # direct home (reader thread already stopped)
             time.sleep(0.3)
-        except Exception as e:
-            print(f"[Shutdown] Command error: {e}")
+        except Exception:
+            logger.critical("Shutdown commands failed", exc_info=True, extra={"event": "shutdown.command_failed"})
         if self.ser:
             try:
                 self.ser.close()
             except Exception:
-                pass
+                logger.exception("Cannot close serial connection", extra={"event": "serial.close_failed"})
         try:
             self.camera.stop()
         except Exception:
-            pass
+            logger.exception("Cannot stop camera during shutdown", extra={"event": "shutdown.camera_failed"})
         try:
             self.destroy()
         except Exception:
-            pass
+            logger.exception("Cannot destroy GUI during shutdown", extra={"event": "shutdown.gui_failed"})
+        logger.info("GUI stopped", extra={"event": "application.stopped"})
         sys.exit(0)
 
 
 if __name__ == "__main__":
+    configure_logging("gui")
+    install_exception_hooks()
     app = MainWindow()
     signal.signal(signal.SIGINT, lambda sig, frame: app.on_closing())
     signal.signal(signal.SIGTERM, lambda sig, frame: app.on_closing())

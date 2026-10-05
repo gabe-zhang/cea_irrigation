@@ -3,9 +3,12 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 import time
 import cv2
 import numpy as np
+
+logger = logging.getLogger("cea_irrigation.plant_ai")
 
 try:
     import ai_edge_litert.interpreter as tflite
@@ -241,6 +244,9 @@ class PlantAIDetector:
         """Attempt to initialize LiteRT with libedgetpu.so.1 delegate."""
         if tflite is None or not self.model_path.is_file():
             self.is_available = False
+            logger.warning("Plant AI inactive", extra={"event": "plant_ai.unavailable", "context": {
+                "reason": "runtime_missing" if tflite is None else "model_missing", "model_path": self.model_path,
+            }})
             return False
 
         try:
@@ -253,12 +259,13 @@ class PlantAIDetector:
             self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
             self.is_available = True
-            print(f"[PlantAI] Coral Edge TPU initialized successfully with {self.model_path.name}")
+            logger.info("Coral Edge TPU initialized", extra={"event": "plant_ai.started", "context": {"model_path": self.model_path}})
             return True
-        except Exception as e:
+        except Exception:
             self.is_available = False
             self.interpreter = None
-            print(f"[PlantAI] Coral Edge TPU unavailable ({e}). Plant AI will remain inactive.")
+            logger.warning("Coral Edge TPU unavailable; plant AI inactive", exc_info=True,
+                           extra={"event": "plant_ai.init_failed", "context": {"model_path": self.model_path}})
             return False
 
     def detect_and_analyze(self, frame: np.ndarray, min_score: float | None = None) -> tuple[list[PlantHealthResult], float]:
@@ -375,8 +382,8 @@ class PlantAIDetector:
                             vi=hue_to_pseudo_ndvi(mean_hue),
                         )
                     )
-            except Exception as e:
-                print(f"[PlantAI] Edge TPU inference error: {e}")
+            except Exception:
+                logger.exception("Edge TPU inference failed", extra={"event": "plant_ai.inference_failed", "rate_limit": True})
 
         # When TPU is disconnected or no plants detected, returns empty results
         return results, latency_ms

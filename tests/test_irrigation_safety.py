@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack
 import csv
+import logging
 from pathlib import Path
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -66,6 +67,43 @@ def watering(tmp_path, monkeypatch):
 
 def mask(app):
     return app.ser.write.call_args.args[0]
+
+
+def test_watering_logs_explain_run_and_safety_stop(watering, caplog):
+    app, clock = watering
+    caplog.set_level(logging.INFO, logger="cea_irrigation")
+    app._start_auto_watering()
+    clock.advance(gui.MAX_WATERING_SEC)
+    events = {getattr(record, "event", None): record for record in caplog.records}
+    started = events["watering.auto_started"].context
+    stopped = events["watering.auto_stopped"].context
+    assert started["channels"] == [1, 2]
+    assert started["moisture_pct"][:2] == [35.8, 37.0]
+    assert started["run_id"] == stopped["run_id"]
+    assert stopped["reason"] == "safety_timeout"
+    assert stopped["elapsed_sec"] == gui.MAX_WATERING_SEC
+    assert events["watering.safety_stop"].levelno == logging.WARNING
+    assert mask(app) == b"0000\n"
+
+
+def test_pump_stop_write_failure_is_critical_with_traceback(watering, caplog):
+    app, _ = watering
+    app.ser.write.side_effect = OSError("device unplugged")
+    app.send_bitmask("0000")
+    failure = next(record for record in caplog.records if getattr(record, "event", None) == "serial.write_failed")
+    assert failure.levelno == logging.CRITICAL
+    assert failure.context["command"] == "0000"
+    assert isinstance(failure.exc_info[1], OSError)
+
+
+def test_image_false_return_is_logged_as_failure(watering, monkeypatch, tmp_path, caplog):
+    app, _ = watering
+    monkeypatch.setattr(gui.cv2, "imwrite", lambda *_: False)
+    path = tmp_path / "snapshot.jpg"
+    app._save_image(path, np.zeros((4, 4, 3), dtype=np.uint8))
+    failure = next(record for record in caplog.records if getattr(record, "event", None) == "image.write_failed")
+    assert failure.context["path"] == path
+    assert not path.exists()
 
 
 def test_recorded_sw_run_stops_channel_two_then_hard_stops_channel_one(watering):

@@ -90,6 +90,25 @@ uv run --extra gui python -m gui.psc_irr_gui
 uv run python scripts/controller.py
 ```
 
+### Event and error logs
+
+The GUI and CLI automatically log watering events, hardware failures, and errors
+to `Data/logs/gui.jsonl` and `Data/logs/controller.jsonl`, with readable console
+output. Records include UTC timestamps, session/run IDs, context, and tracebacks.
+Files rotate at 5 MiB with five backups.
+
+Logging defaults to `INFO`. Set `CEA_LOG_LEVEL=DEBUG` for detailed diagnostics
+or `CEA_LOG_DIR` to change the directory:
+
+```bash
+CEA_LOG_LEVEL=DEBUG uv run --extra gui python -m gui.psc_irr_gui
+tail -f Data/logs/gui.jsonl
+```
+
+Repeated errors are rate limited; critical errors always emit. Console logging
+continues if file storage fails. Use separate log directories for concurrent
+instances of the same application.
+
 ---
 
 ## Firmware
