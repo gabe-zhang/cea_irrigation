@@ -143,3 +143,32 @@ def test_range_bounds_and_labels_share_rolling_policy(tmp_path):
     )
     hist = read_historical_telemetry(tmp_path, "week", now=now)
     assert hist["timestamps"] == [datetime(2026, 9, 25, 12)]
+
+
+@pytest.mark.parametrize("mode", ["week", "month", "period"])
+@pytest.mark.parametrize("now", [datetime(2026, 10, 5, 16, 50, 37), datetime(2028, 3, 1)])
+def test_historical_date_ticks_start_at_range_boundary(plotter, tmp_path, monkeypatch, mode, now):
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls):
+            return now
+
+    monkeypatch.setattr(gui, "datetime", FrozenDatetime)
+    monkeypatch.setattr(gui, "TELEMETRY_DIR", tmp_path)
+    first, last = telemetry_range_bounds("month" if mode == "period" else mode, now)
+    plotter.start_date_var = lambda: first.date()
+    plotter.end_date_var = lambda: last.date()
+    first, last = telemetry_range_bounds(mode, now, first.date(), last.date())
+    (tmp_path / "telemetry_ticks.csv").write_text(
+        HEADER + f"{first:%Y-%m-%d %H:%M:%S},400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
+    )
+
+    plotter._render_historical_figure(mode)
+
+    for axis in (plotter.ax_temp, plotter.ax_moist):
+        assert axis.get_xlim() == pytest.approx(gui.mdates.date2num([first, last]), rel=0, abs=1e-9)
+        ticks = axis.get_xticks()
+        assert ticks[0] == pytest.approx(gui.mdates.date2num(first), rel=0, abs=1e-9)
+        assert all(axis.get_xlim()[0] <= tick <= axis.get_xlim()[1] for tick in ticks)
+        assert axis.xaxis.get_major_formatter()(ticks[0]) == gui.visible_date(first)
+    assert gui.visible_date(first) in plotter.fig._suptitle.get_text()

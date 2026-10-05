@@ -65,12 +65,11 @@ except (ImportError, ModuleNotFoundError):
 
 # Plot styling
 AIR_TEMP_COLOR = "#d62728"
-SOIL_TEMP_COLOR = "#d95f02"
 HUMIDITY_COLOR = "#00838f"
 LIGHT_COLOR = "#FFD700"
 DARK_YELLOW = "#B8860B"
 LIGHT_AXIS_MAX_LUX = 4000
-OUTPUT_FONT = ("arial", 20, "bold")
+OUTPUT_FONT = ("arial", 28, "bold")
 SENSOR_DOTS = {"marker": "o", "linestyle": "None", "markersize": 4}
 
 # Constants & Soil Calibration
@@ -637,7 +636,7 @@ class PlotWindow:
         artists = []
         for axis, values, color, label in (
             (self.ax_temp, air_temp, AIR_TEMP_COLOR, "Air temp, °C"),
-            (self.ax_temp, soil_temp, SOIL_TEMP_COLOR, "Soil temp, °C"),
+            (self.ax_temp, soil_temp, DARK_YELLOW, "Soil temp, °C"),
             (self.ax_temp, rh, HUMIDITY_COLOR, "RH, %"),
             (self.ax_light, light, LIGHT_COLOR, "Light, Lux"),
         ):
@@ -813,7 +812,13 @@ class PlotWindow:
             xlabel = "Time"
         else:
             span_days = (end_date - start_date).days + 1 if mode == "period" else (7 if mode == "week" else 30)
-            ax_moist.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, (span_days + 6) // 7)))
+            tick_interval = max(1, (span_days + 6) // 7)
+            # Anchor labels to the actual start, including rolling time-of-day.
+            # DayLocator uses midnight ticks and can skip the title's first date.
+            ax_moist.set_xticks([
+                first + timedelta(days=offset)
+                for offset in range(0, (last - first).days + 1, tick_interval)
+            ])
             ax_moist.xaxis.set_major_formatter(mdates.DateFormatter(VISIBLE_DATE_FORMAT))
             xlabel = "Date"
         ax_moist.set_xlabel(xlabel, fontsize=18, fontweight="bold")
@@ -1340,7 +1345,7 @@ class MainWindow(tk.Tk):
             command=self._open_period_picker, pady=2,
         )
         self.range_summary_button.grid(row=0, column=0, sticky="ew", padx=(4, 2))
-        self.record_label = tk.Label(self.card_data, text="Record", font=("arial", 16, "bold"), bg="white", anchor="center")
+        self.record_label = tk.Label(self.card_data, text="Record", font=("arial", 18, "bold"), bg="white", anchor="center")
         self.record_label.grid(row=2, column=0, rowspan=2, sticky="nsew", padx=10, pady=8)
         self.data_record_frame = tk.Frame(self.card_data, bg="white")
         self.data_record_frame.grid(row=2, column=1, sticky="nsew", padx=(3, 6), pady=4)
@@ -1531,7 +1536,7 @@ class MainWindow(tk.Tk):
         row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(6, 0))
         tk.Label(row1, text="ENV:", font=OUTPUT_FONT, fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
 
-        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=OUTPUT_FONT, fg=SOIL_TEMP_COLOR, bg="#1a1d20")
+        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=OUTPUT_FONT, fg=DARK_YELLOW, bg="#1a1d20")
         self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=OUTPUT_FONT, fg=AIR_TEMP_COLOR, bg="#1a1d20")
         self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=OUTPUT_FONT, fg=HUMIDITY_COLOR, bg="#1a1d20")
         self.lbl_light = tk.Label(row1, text="Light: -- lux", font=OUTPUT_FONT, fg=LIGHT_COLOR, bg="#1a1d20")
