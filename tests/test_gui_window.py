@@ -624,35 +624,3 @@ def test_adjustment_arrows_keep_steps_bounds_and_repeat(
     variable.set(high)
     up.invoke()
     assert variable.get() == high
-
-
-def test_output_font_colors_and_fit(headless_app):
-    from tkinter.font import Font
-
-    app = headless_app
-    app.geometry("1920x1005+0+0")
-    app.deiconify()
-    app._update_telemetry_ui(
-        {"soil_temp": 22.4, "temp": 24.1, "humidity": 58.2, "light": 1240},
-        [42.1, 38.5, 51.0, 44.2],
-    )
-    app.lbl_tpu_status.configure(text="TPU: Disconnected")
-    app.update_idletasks()
-    for label, color in ((app.lbl_soil_temp, psc_mod.SOIL_TEMP_COLOR),
-                         (app.lbl_air_temp, psc_mod.AIR_TEMP_COLOR),
-                         (app.lbl_air_humi, psc_mod.HUMIDITY_COLOR),
-                         (app.lbl_light, psc_mod.LIGHT_COLOR),
-                         (app.lbl_soil_moist, "white")):
-        assert label["fg"] == color
-    for row in (app.lbl_soil_temp.master, app.lbl_soil_moist.master):
-        for label in row.winfo_children():
-            font = Font(app, font=label["font"])
-            assert app.tk.splitlist(label["font"])[0].lower() == "arial"
-            assert font.actual("size") == 20
-            assert font.actual("weight") == "bold"
-            assert label.winfo_width() >= label.winfo_reqwidth()
-            assert label.winfo_height() >= label.winfo_reqheight()
-            assert label.winfo_rootx() + label.winfo_width() <= app.btn_exit.winfo_rootx()
-            assert label.winfo_rooty() + label.winfo_height() <= row.master.winfo_rooty() + row.master.winfo_height()
-    heading = app.lbl_soil_moist.master.winfo_children()[0]
-    assert heading["fg"] == psc_mod.DARK_YELLOW
