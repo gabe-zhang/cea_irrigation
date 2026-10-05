@@ -268,13 +268,20 @@ def telemetry_range_bounds(
     raise ValueError(f"Unknown telemetry range: {mode}")
 
 
+VISIBLE_DATE_FORMAT = "%m/%d/%Y"
+
+
+def visible_date(value: date | datetime) -> str:
+    return value.strftime(VISIBLE_DATE_FORMAT)
+
+
 def range_date_label(mode: str, now: datetime, start_date=None, end_date=None) -> str:
     if mode == "min":
         return ""
     first, last = telemetry_range_bounds(mode, now, start_date, end_date)
     if mode == "day":
-        return first.date().isoformat()
-    return f"{first.date().isoformat()} – {last.date().isoformat()}"
+        return visible_date(first)
+    return f"{visible_date(first)} – {visible_date(last)}"
 
 
 class PeriodRangePicker(tk.Toplevel):
@@ -293,7 +300,7 @@ class PeriodRangePicker(tk.Toplevel):
                  pady=8).pack(fill=tk.X)
         self.calendar = Calendar(
             self, selectmode="day", year=start.year, month=start.month, day=start.day,
-            date_pattern="yyyy-mm-dd", font=("arial", 16), showweeknumbers=False,
+            date_pattern="mm/dd/yyyy", font=("arial", 16), showweeknumbers=False,
         )
         self.calendar.pack(padx=10, pady=4)
         self.calendar.tag_config("range", background="#dce6ff", foreground="#212529")
@@ -346,11 +353,11 @@ class PeriodRangePicker(tk.Toplevel):
     def select_date(self, selected: date):
         if self.draft_start is None or self.draft_end is not None:
             self.draft_start, self.draft_end = selected, None
-            self.status.set(f"Start: {selected.isoformat()} · Choose end date")
+            self.status.set(f"Start: {visible_date(selected)} · Choose end date")
             self.apply_button.configure(state=tk.DISABLED)
         else:
             self.draft_start, self.draft_end = sorted((self.draft_start, selected))
-            self.status.set(f"{self.draft_start.isoformat()} – {self.draft_end.isoformat()}")
+            self.status.set(f"{visible_date(self.draft_start)} – {visible_date(self.draft_end)}")
             self.apply_button.configure(state=tk.NORMAL)
         self.calendar.selection_clear()
         self._highlight()
@@ -790,7 +797,7 @@ class PlotWindow:
         else:
             span_days = (end_date - start_date).days + 1 if mode == "period" else (7 if mode == "week" else 30)
             ax_moist.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, (span_days + 6) // 7)))
-            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+            ax_moist.xaxis.set_major_formatter(mdates.DateFormatter(VISIBLE_DATE_FORMAT))
             xlabel = "Date"
         ax_moist.set_xlabel(xlabel, fontsize=18, fontweight="bold")
 
@@ -1299,23 +1306,23 @@ class MainWindow(tk.Tk):
         self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
         self.plot_range_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self._date_range_frame = tk.Frame(self.card_data, bg="white", height=32)
+        self._date_range_frame = tk.Frame(self.card_data, bg="white", height=44)
         self._date_range_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6)
         self._date_range_frame.grid_propagate(False)
         self._date_range_frame.grid_columnconfigure(0, weight=1)
         self._date_range_frame.grid_rowconfigure(0, weight=1)
         self.range_summary_label = tk.Label(
             self._date_range_frame, textvariable=self.range_summary_var,
-            font=("arial", 12, "bold"), bg="white", anchor="w",
+            font=("arial", 17, "bold"), bg="white", anchor="center",
         )
         self.range_summary_label.grid(row=0, column=0, sticky="ew", padx=(4, 2))
-        self.btn_period = tk.Button(
-            self._date_range_frame, text="Select period", font=("arial", 12, "bold"),
+        self.range_summary_button = tk.Button(
+            self._date_range_frame, textvariable=self.range_summary_var, font=("arial", 17, "bold"),
             command=self._open_period_picker, pady=2,
         )
-        self.btn_period.grid(row=0, column=1, padx=(2, 0))
-        self.record_label = tk.Label(self.card_data, text="Record", font=("arial", 16, "bold"), bg="white")
-        self.record_label.grid(row=2, column=0, rowspan=2, sticky="nw", padx=10, pady=8)
+        self.range_summary_button.grid(row=0, column=0, sticky="ew", padx=(4, 2))
+        self.record_label = tk.Label(self.card_data, text="Record", font=("arial", 16, "bold"), bg="white", anchor="center")
+        self.record_label.grid(row=2, column=0, rowspan=2, sticky="nsew", padx=10, pady=8)
         self.data_record_frame = tk.Frame(self.card_data, bg="white")
         self.data_record_frame.grid(row=2, column=1, sticky="nsew", padx=(3, 6), pady=4)
         self.image_record_frame = tk.Frame(self.card_data, bg="white")
@@ -1431,10 +1438,12 @@ class MainWindow(tk.Tk):
     def _on_plot_range_changed(self, *_args):
         self._refresh_range_summary()
         if self.plot_range_var.get() == "period":
-            self.btn_period.grid()
-            self.btn_period.configure(state=tk.NORMAL if Calendar else tk.DISABLED)
+            self.range_summary_label.grid_remove()
+            self.range_summary_button.grid()
+            self.range_summary_button.configure(state=tk.NORMAL if Calendar else tk.DISABLED)
         else:
-            self.btn_period.grid_remove()
+            self.range_summary_button.grid_remove()
+            self.range_summary_label.grid()
             self._close_period_picker()
 
     def _refresh_range_day(self):
@@ -1454,7 +1463,7 @@ class MainWindow(tk.Tk):
             self._period_picker.focus_set()
             return
         self._period_picker = PeriodRangePicker(
-            self, self.period_start, self.period_end, self._apply_period, self.btn_period,
+            self, self.period_start, self.period_end, self._apply_period, self.range_summary_button,
         )
 
     def _apply_period(self, start: date, end: date):

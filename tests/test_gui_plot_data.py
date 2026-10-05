@@ -134,8 +134,8 @@ def test_range_bounds_and_labels_share_rolling_policy(tmp_path):
     now = datetime(2026, 10, 2, 12)
     assert telemetry_range_bounds("week", now) == (datetime(2026, 9, 25, 12), now)
     assert telemetry_range_bounds("month", now) == (datetime(2026, 9, 2, 12), now)
-    assert range_date_label("week", now) == "2026-09-25 – 2026-10-02"
-    assert range_date_label("month", now) == "2026-09-02 – 2026-10-02"
+    assert range_date_label("week", now) == "09/25/2026 – 10/02/2026"
+    assert range_date_label("month", now) == "09/02/2026 – 10/02/2026"
     (tmp_path / "telemetry_bounds.csv").write_text(
         HEADER + "2026-09-25 11:59:59,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
         + "2026-09-25 12:00:00,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"

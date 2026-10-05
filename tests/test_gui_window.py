@@ -213,6 +213,12 @@ def test_range_calendar_fits_inside_main_window(headless_app, geometry):
     app.update_idletasks()
     popup = app._period_picker
     assert popup.winfo_ismapped()
+    anchor = app.range_summary_button
+    assert popup.winfo_rootx() == max(app.winfo_rootx(), min(
+        anchor.winfo_rootx(), app.winfo_rootx() + app.winfo_width() - popup.winfo_width()))
+    assert popup.winfo_rooty() == max(app.winfo_rooty(), min(
+        anchor.winfo_rooty() + anchor.winfo_height(),
+        app.winfo_rooty() + app.winfo_height() - popup.winfo_height()))
     assert popup.winfo_rootx() >= app.winfo_rootx()
     assert popup.winfo_rooty() >= app.winfo_rooty()
     assert popup.winfo_rootx() + popup.winfo_width() <= app.winfo_rootx() + app.winfo_width()
@@ -239,10 +245,10 @@ def test_data_card_order_and_reserved_dates(headless_app):
     now = datetime(2026, 10, 2, 12)
     record_positions = []
     for mode, expected in (
-        ("min", ""), ("day", "2026-10-02"),
-        ("week", "2026-09-25 – 2026-10-02"),
-        ("month", "2026-09-02 – 2026-10-02"),
-        ("period", f"{date.today().isoformat()} – {date.today().isoformat()}"),
+        ("min", ""), ("day", "10/02/2026"),
+        ("week", "09/25/2026 – 10/02/2026"),
+        ("month", "09/02/2026 – 10/02/2026"),
+        ("period", f"{date.today().strftime("%m/%d/%Y")} – {date.today().strftime("%m/%d/%Y")}"),
     ):
         app.plot_range_var.set(mode)
         app._refresh_range_summary(now)
@@ -251,16 +257,21 @@ def test_data_card_order_and_reserved_dates(headless_app):
         assert app._date_range_frame.winfo_manager() == "grid"
         record_positions.append(app.data_record_frame.winfo_y())
     assert len(set(record_positions)) == 1
-    assert app.btn_period.winfo_manager() == "grid"
-    assert app.range_summary_label.grid_info()["row"] == app.btn_period.grid_info()["row"] == 0
-    assert app.range_summary_label.grid_info()["column"] < app.btn_period.grid_info()["column"]
+    assert app.range_summary_button.winfo_manager() == "grid"
+    assert app.range_summary_label.winfo_manager() == ""
+    assert app.range_summary_button.grid_info()["row"] == 0
+    assert app.range_summary_button.grid_info()["column"] == 0
+    assert app.range_summary_button["text"] == expected
+    assert app.record_label["anchor"] == "center"
+    assert app.record_label.grid_info()["sticky"] == "nesw"
+    assert app.record_label.grid_info()["rowspan"] == 2
     dropdowns = (app.plot_range_dropdown, app.data_record_dropdown, app.image_record_dropdown)
     assert len({dropdown.winfo_rootx() for dropdown in dropdowns}) == 1
     assert len({dropdown.winfo_width() for dropdown in dropdowns}) == 1
-    assert app.range_summary_label.winfo_rootx() + app.range_summary_label.winfo_width() <= app.btn_period.winfo_rootx()
-    assert app.range_summary_label.winfo_width() >= app.range_summary_label.winfo_reqwidth()
+    assert app.range_summary_button.winfo_width() >= app.range_summary_button.winfo_reqwidth()
     app.plot_range_var.set("min")
-    assert app.btn_period.winfo_manager() == ""
+    assert app.range_summary_button.winfo_manager() == ""
+    assert app.range_summary_label.winfo_manager() == "grid"
 
 
 def test_period_draft_apply_cancel_and_reversed_dates(headless_app):
@@ -269,12 +280,14 @@ def test_period_draft_apply_cancel_and_reversed_dates(headless_app):
     app = headless_app
     original = (app.period_start, app.period_end)
     app.plot_range_var.set("period")
-    app._open_period_picker()
+    app.range_summary_button.invoke()
     picker = app._period_picker
+    assert picker.calendar.cget("date_pattern").lower() == "mm/dd/yyyy"
     assert str(picker.apply_button["state"]) == tk.DISABLED
     picker.select_date(date(2026, 10, 3))
     picker.select_date(date(2026, 9, 28))
     assert (picker.draft_start, picker.draft_end) == (date(2026, 9, 28), date(2026, 10, 3))
+    assert picker.status.get() == "09/28/2026 – 10/03/2026"
     assert (app.period_start, app.period_end) == original
     picker.destroy()  # window-manager Cancel equivalent
     assert (app.period_start, app.period_end) == original
@@ -288,7 +301,7 @@ def test_period_draft_apply_cancel_and_reversed_dates(headless_app):
         redraw.assert_called_once_with()
         app.plotter.window = None
     assert (app.period_start, app.period_end) == (date(2026, 12, 31), date(2027, 1, 2))
-    assert app.range_summary_var.get() == "2026-12-31 – 2027-01-02"
+    assert app.range_summary_var.get() == "12/31/2026 – 01/02/2027"
     assert not picker.winfo_exists()
     app.plot_range_var.set("day")
     app.plot_range_var.set("period")
@@ -343,8 +356,9 @@ def test_period_mode_exit_escape_and_missing_calendar(headless_app, monkeypatch)
     assert not picker.winfo_exists()
     monkeypatch.setattr(psc_mod, "Calendar", None)
     app.plot_range_var.set("period")
-    assert str(app.btn_period["state"]) == tk.DISABLED
+    assert str(app.range_summary_button["state"]) == tk.DISABLED
     assert app.range_summary_var.get() == "Calendar unavailable"
+    assert app.range_summary_button["text"] == "Calendar unavailable"
     app._open_period_picker()
     assert app._period_picker is None
 
@@ -362,8 +376,8 @@ def test_plot_mode_labels_and_window_manager_close(headless_app, tmp_path, monke
 
     for mode, title, fmt in (
         ("day", "Day", "%H:%M"),
-        ("week", "Week", "%Y-%m-%d"),
-        ("month", "Month", "%Y-%m-%d"),
+        ("week", "Week", "%m/%d/%Y"),
+        ("month", "Month", "%m/%d/%Y"),
     ):
         app.plot_range_var.set(mode)
         assert title in app.plotter.window.title()
@@ -373,7 +387,7 @@ def test_plot_mode_labels_and_window_manager_close(headless_app, tmp_path, monke
     app.period_end = date.today()
     app.plot_range_var.set("period")
     assert "Period" in app.plotter.window.title()
-    assert app.plotter.fig.axes[2].xaxis.get_major_formatter().fmt == "%Y-%m-%d"
+    assert app.plotter.fig.axes[2].xaxis.get_major_formatter().fmt == "%m/%d/%Y"
 
     close_command = app.plotter.window.protocol("WM_DELETE_WINDOW")
     app.tk.call(close_command)
