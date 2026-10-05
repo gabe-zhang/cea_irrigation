@@ -60,9 +60,12 @@ SENSOR_DOTS = {"marker": "o", "linestyle": "None", "markersize": 4}
 
 # Constants & Soil Calibration
 BAUDRATE = 9600
-SOIL_WATER_SETPOINT = 40.0  # 10am scheduled check starts watering below this moisture %
-SCHEDULED_TARGET_PCT = 80.0  # Scheduled irrigation shuts off when channel reaches 80%
-SCHEDULED_MAX_WATERING_SEC = 60  # hard safety timeout
+SOIL_WATER_SETPOINT = 40.0  # Auto irrigation starts below this moisture %
+AUTO_TARGET_PCT = 80.0  # Auto irrigation stops at this moisture %
+MAX_WATERING_SEC = 60  # hard safety timeout
+AUTO_CHECK_INTERVAL_MS = 2000
+AUTO_START_READINGS = 3
+WATERING_RECORD_EVERY = 2  # Save every second fresh telemetry update during watering.
 PUMP_FLOW_RATE_LPH = 500.0  # Pump flow rate: 500 L/Hour
 PUMP_FLOW_RATE_LPS = PUMP_FLOW_RATE_LPH / 3600.0  # ~0.13889 Liters/Second
 DRY_BASELINES = [432.0, 408.0, 427.0, 424.0]
@@ -71,9 +74,9 @@ WET_BASELINES = [136.0, 92.0, 159.0, 160.0]
 DATA_DIR = Path("Data")
 TELEMETRY_DIR = DATA_DIR / "telemetry"
 IMAGES_DIR = DATA_DIR / "images"
-SCHEDULED_WATERING_DIR = IMAGES_DIR / "scheduled_watering"
+AUTO_WATERING_DIR = IMAGES_DIR / "auto_watering"
 
-for _p in (DATA_DIR, TELEMETRY_DIR, IMAGES_DIR, SCHEDULED_WATERING_DIR):
+for _p in (DATA_DIR, TELEMETRY_DIR, IMAGES_DIR, AUTO_WATERING_DIR):
     _p.mkdir(parents=True, exist_ok=True)
 
 # Hardware Safety Bounds and Home
@@ -466,7 +469,7 @@ def read_historical_telemetry(
             else:
                 if i in active_runs:
                     run = active_runs.pop(i)
-                    dur = max(1.0, min((dt - run["start"]).total_seconds(), float(SCHEDULED_MAX_WATERING_SEC)))
+                    dur = max(1.0, min((dt - run["start"]).total_seconds(), float(MAX_WATERING_SEC)))
                     vol = round(dur * PUMP_FLOW_RATE_LPS, 2)
                     pump_events.append({
                         "timestamp": run["start"],
@@ -476,7 +479,7 @@ def read_historical_telemetry(
                     })
 
     for i, run in list(active_runs.items()):
-        dur = max(1.0, min((run["last"] - run["start"]).total_seconds(), float(SCHEDULED_MAX_WATERING_SEC)))
+        dur = max(1.0, min((run["last"] - run["start"]).total_seconds(), float(MAX_WATERING_SEC)))
         if dur <= 1.0 and rows:
             dur = 10.0
         vol = round(dur * PUMP_FLOW_RATE_LPS, 2)
@@ -628,7 +631,7 @@ class PlotWindow:
             self.lines_moist.append(line)
 
         sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
-        ssp = float(self.stop_setpoint_var.get()) if self.stop_setpoint_var else SCHEDULED_TARGET_PCT
+        ssp = float(self.stop_setpoint_var.get()) if self.stop_setpoint_var else AUTO_TARGET_PCT
         self.line_setpoint = self.ax_moist.axhline(
             sp, color="#e63946", linestyle="--", linewidth=2.5
         )
@@ -715,7 +718,7 @@ class PlotWindow:
             self.lines_moist.append(line)
 
         sp = float(self.setpoint_var.get()) if self.setpoint_var else SOIL_WATER_SETPOINT
-        ssp = float(self.stop_setpoint_var.get()) if self.stop_setpoint_var else SCHEDULED_TARGET_PCT
+        ssp = float(self.stop_setpoint_var.get()) if self.stop_setpoint_var else AUTO_TARGET_PCT
         self.line_setpoint = ax_moist.axhline(sp, color="#e63946", linestyle="--", linewidth=2.2)
         self.line_stop = ax_moist.axhline(ssp, color="#2ecc71", linestyle="--", linewidth=2.2)
 
@@ -948,10 +951,10 @@ class MainWindow(tk.Tk):
         self._repeat_job: str | None = None
         self._data_logger_job: str | None = None
         self._image_logger_job: str | None = None
-        self._scheduled_ticker_job: str | None = None
-        self._scheduled_monitor_job: str | None = None
-        self._scheduled_safety_job: str | None = None
-        self._scheduled_time_job: str | None = None
+        self._auto_ticker_job: str | None = None
+        self._auto_monitor_job: str | None = None
+        self._auto_safety_job: str | None = None
+        self._auto_time_job: str | None = None
 
         self.camera = Camera(width=self.scr_w - margin_w, height=self.scr_h - int(self.scr_h / 5))
         self.plant_ai = PlantAIDetector()
@@ -961,9 +964,9 @@ class MainWindow(tk.Tk):
         # State Models & Options
         self.auto_var = tk.IntVar(value=1)
         self.soil_water_setpoint = tk.DoubleVar(value=SOIL_WATER_SETPOINT)
-        self.soil_water_stop_setpoint = tk.DoubleVar(value=SCHEDULED_TARGET_PCT)
+        self.soil_water_stop_setpoint = tk.DoubleVar(value=AUTO_TARGET_PCT)
         self.start_setpoint_display = tk.StringVar(value=f"{SOIL_WATER_SETPOINT:.0f}%")
-        self.stop_setpoint_display = tk.StringVar(value=f"{SCHEDULED_TARGET_PCT:.0f}%")
+        self.stop_setpoint_display = tk.StringVar(value=f"{AUTO_TARGET_PCT:.0f}%")
         self.plot_var = tk.IntVar(value=0)
         self.plot_range_var = tk.StringVar(value="min")
         self.period_start = self.period_end = date.today()
@@ -979,19 +982,22 @@ class MainWindow(tk.Tk):
 
         # Irrigation turn-off method: "SW" (soil %) or "Time" (seconds)
         self.off_method_var = tk.StringVar(value="SW")   # default: soil-based stop
-        self.off_value_display = tk.StringVar(value=f"{SCHEDULED_TARGET_PCT:.0f}%")  # shown in turn-off row
+        self.off_value_display = tk.StringVar(value=f"{AUTO_TARGET_PCT:.0f}%")  # shown in turn-off row
         self.pump_duration_var = tk.IntVar(value=5)        # seconds, 1-60, step 1
         self.pump_duration_display = tk.StringVar(value=" 5 sec")
         self._relay_timers: list[str | None] = []         # after() job IDs, one per relay
 
-        # Scheduled Watering State
-        self._last_scheduled_date: str | None = None
-        self._scheduled_watering_active: bool = False
-        self._scheduled_run_dir: Path | None = None
-        self._scheduled_start_time: float | None = None
-        self._scheduled_channels_active: list[int] = []
-        self._scheduled_off_method = "SW"
-        self._scheduled_duration_sec = 0
+        # Automatic watering state. Count only fresh readings at each 2s check.
+        self._telemetry_sequence = 0
+        self._auto_checked_sequence = 0
+        self._below_threshold_counts: list[int] = []
+        self._watering_record_count = 0
+        self._auto_watering_active: bool = False
+        self._auto_run_dir: Path | None = None
+        self._auto_start_time: float | None = None
+        self._auto_channels_active: list[int] = []
+        self._auto_off_method = "SW"
+        self._auto_duration_sec = 0
 
         # Build UI Layout
         paned = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=4)
@@ -1054,13 +1060,13 @@ class MainWindow(tk.Tk):
         self._init_serial()
         self._camera_loop()
         self._start_periodic_loggers()
-        self._start_scheduled_ticker()
+        self._start_auto_ticker()
 
     def _adjust_stop_setpoint(self, delta: float) -> None:
         try:
             cur = float(self.soil_water_stop_setpoint.get())
         except (ValueError, tk.TclError):
-            cur = SCHEDULED_TARGET_PCT
+            cur = AUTO_TARGET_PCT
         new_val = round(cur + delta, 1)
         new_val = max(10.0, min(100.0, new_val))
         self.soil_water_stop_setpoint.set(new_val)
@@ -1218,7 +1224,7 @@ class MainWindow(tk.Tk):
         )
         self.btn_off_up.pack(side=tk.LEFT, padx=(0, 2))
 
-        # Legacy aliases kept for compatibility with scheduled watering logic
+        # The irrigation controller shares these variables with the UI.
         self.btn_setpoint_down = self.btn_start_down
         self.btn_setpoint_up = self.btn_start_up
         self.btn_stop_down = self.btn_off_down
@@ -1499,8 +1505,9 @@ class MainWindow(tk.Tk):
 
     def _periodic_data_logger(self) -> None:
         try:
-            moist = self.telemetry.get("moisture_pct", [])
-            self._log_telemetry_csv(self.telemetry, moist)
+            if not self._auto_watering_active:
+                moist = self.telemetry.get("moisture_pct", [])
+                self._log_telemetry_csv(self.telemetry, moist)
         except Exception as e:
             print(f"[Periodic Data Logger] Error: {e}")
         finally:
@@ -1509,7 +1516,7 @@ class MainWindow(tk.Tk):
 
     def _periodic_image_logger(self) -> None:
         try:
-            if self.camera and self.camera.is_available:
+            if not self._auto_watering_active and self.camera and self.camera.is_available:
                 clean_frame = self.camera.capture_array()
                 if clean_frame is not None:
                     img_path = IMAGES_DIR / f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
@@ -1521,87 +1528,100 @@ class MainWindow(tk.Tk):
             interval_ms = parse_interval_to_ms(self.image_record_var.get(), default_ms=3_600_000)
             self._image_logger_job = self.after(interval_ms, self._periodic_image_logger)
 
-    def _start_scheduled_ticker(self) -> None:
-        self._scheduled_ticker_job = self.after(60_000, self._scheduled_check_ticker)
+    def _start_auto_ticker(self) -> None:
+        self._auto_ticker_job = self.after(AUTO_CHECK_INTERVAL_MS, self._auto_check_ticker)
 
-    def _scheduled_check_ticker(self) -> None:
+    def _auto_check_ticker(self) -> None:
+        self._auto_ticker_job = None
         try:
-            now = datetime.now()
-            today_str = now.strftime("%Y-%m-%d")
-            if now.hour == 10 and now.minute == 0:
-                if self._last_scheduled_date != today_str:
-                    if self.auto_var.get():
-                        print(f"[Scheduled] 10:00 AM CST check triggered on {today_str}.")
-                        self._start_scheduled_watering(today_str)
-                    else:
-                        print(f"[Scheduled] 10:00 AM CST check skipped: Mode is MANUAL.")
-                        self._last_scheduled_date = today_str
+            fresh = self._telemetry_sequence != self._auto_checked_sequence
+            self._auto_checked_sequence = self._telemetry_sequence
+            if not self.auto_var.get() or self._auto_watering_active or not fresh:
+                self._below_threshold_counts = [0] * len(self.water_vars)
+                return
+            moistures = self.telemetry.get("moisture_pct", [])
+            setpoint = float(self.soil_water_setpoint.get())
+            previous = self._below_threshold_counts
+            self._below_threshold_counts = [
+                (previous[ch] if ch < len(previous) else 0) + 1
+                if ch < len(moistures) and moistures[ch] is not None and moistures[ch] < setpoint
+                else 0
+                for ch in range(len(self.water_vars))
+            ]
+            self._start_auto_watering()
         except Exception as e:
-            print(f"[Scheduled Ticker] Error: {e}")
+            self._below_threshold_counts = [0] * len(self.water_vars)
+            print(f"[Auto Ticker] Error: {e}")
         finally:
-            self._scheduled_ticker_job = self.after(60_000, self._scheduled_check_ticker)
+            self._start_auto_ticker()
 
-    def _start_scheduled_watering(self, date_str: str | None = None) -> None:
-        if not self.auto_var.get() or self._scheduled_watering_active:
+    def _start_auto_watering(self) -> None:
+        if not self.auto_var.get() or self._auto_watering_active:
             return
-        self._last_scheduled_date = date_str or datetime.now().strftime("%Y-%m-%d")
         moistures = self.telemetry.get("moisture_pct", [])
         setpoint = float(self.soil_water_setpoint.get())
         active_channels = [
             ch for ch, m in enumerate(moistures[:len(self.water_vars)])
             if m is not None and m < setpoint
+            and ch < len(self._below_threshold_counts)
+            and self._below_threshold_counts[ch] >= AUTO_START_READINGS
         ]
         if not active_channels:
-            print(f"[Scheduled] No channels below start setpoint ({setpoint}%).")
             return
 
         # Resolve settings and arm BOTH stop paths before energizing any pump.
         # Use the same mode variable as the SW/Time dropdown.
         try:
-            self._scheduled_off_method = self.off_method_var.get()
-            if self._scheduled_off_method not in ("SW", "Time"):
+            self._auto_off_method = self.off_method_var.get()
+            if self._auto_off_method not in ("SW", "Time"):
                 raise ValueError("Unknown irrigation turn-off method")
-            self._scheduled_duration_sec = max(
-                1, min(SCHEDULED_MAX_WATERING_SEC, int(self.pump_duration_var.get()))
+            self._auto_duration_sec = max(
+                1, min(MAX_WATERING_SEC, int(self.pump_duration_var.get()))
             )
-            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self._scheduled_run_dir = SCHEDULED_WATERING_DIR / run_stamp
-            self._scheduled_run_dir.mkdir(parents=True, exist_ok=True)
-            self._scheduled_start_time = time.monotonic()
-            self._scheduled_channels_active = list(active_channels)
-            self._scheduled_watering_active = True
-            self._scheduled_safety_job = self.after(
-                SCHEDULED_MAX_WATERING_SEC * 1000, self._scheduled_safety_stop
+            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self._auto_run_dir = AUTO_WATERING_DIR / run_stamp
+            self._auto_run_dir.mkdir(parents=True, exist_ok=True)
+            self._auto_start_time = time.monotonic()
+            self._auto_channels_active = list(active_channels)
+            self._auto_watering_active = True
+            self._below_threshold_counts = [0] * len(self.water_vars)
+            self._watering_record_count = 0
+            self._auto_safety_job = self.after(
+                MAX_WATERING_SEC * 1000, self._auto_safety_stop
             )
-            if self._scheduled_off_method == "Time":
-                self._scheduled_time_job = self.after(
-                    self._scheduled_duration_sec * 1000, self._finish_scheduled_watering
+            if self._auto_off_method == "Time":
+                self._auto_time_job = self.after(
+                    self._auto_duration_sec * 1000, self._finish_auto_watering
                 )
-            self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
-            self._apply_scheduled_channels()
-            print(f"[Scheduled/{self._scheduled_off_method}] Started channels {[c+1 for c in active_channels]}.")
+            self._auto_monitor_job = self.after(AUTO_CHECK_INTERVAL_MS, self._auto_watering_monitor)
+            self._apply_auto_channels()
+            self._log_watering_telemetry()
+            print(f"[Auto/{self._auto_off_method}] Started channels {[c+1 for c in active_channels]}.")
         except Exception:
-            self._finish_scheduled_watering()
+            self._finish_auto_watering()
             raise
 
-    def _apply_scheduled_channels(self) -> None:
+    def _apply_auto_channels(self) -> None:
         mask = "".join(
-            "1" if i in self._scheduled_channels_active else "0"
+            "1" if i in self._auto_channels_active else "0"
             for i in range(len(self.water_vars))
         )
         for i, var in enumerate(self.water_vars):
-            var.set(1 if i in self._scheduled_channels_active else 0)
+            var.set(1 if i in self._auto_channels_active else 0)
         self.send_bitmask(mask)
 
-    def _finish_scheduled_watering(self) -> None:
-        """Stop pumps and cancel every callback owned by this scheduled run."""
-        self._scheduled_watering_active = False
-        self._scheduled_channels_active = []
-        self._scheduled_start_time = None
+    def _finish_auto_watering(self) -> None:
+        """Stop pumps and cancel every callback owned by this watering run."""
+        was_active = self._auto_watering_active
+        self._auto_watering_active = False
+        self._auto_channels_active = []
+        self._auto_start_time = None
+        self._below_threshold_counts = [0] * len(self.water_vars)
+        self._auto_checked_sequence = self._telemetry_sequence
         for var in self.water_vars:
             var.set(0)
         self.send_bitmask("0" * len(self.water_vars))
-        for attr in ("_scheduled_monitor_job", "_scheduled_time_job", "_scheduled_safety_job"):
+        for attr in ("_auto_monitor_job", "_auto_time_job", "_auto_safety_job"):
             job = getattr(self, attr)
             setattr(self, attr, None)
             if job is not None:
@@ -1609,53 +1629,63 @@ class MainWindow(tk.Tk):
                     self.after_cancel(job)
                 except (tk.TclError, ValueError):
                     pass
+        if was_active:
+            self._log_watering_telemetry()
 
-    def _scheduled_safety_stop(self) -> None:
-        self._scheduled_safety_job = None
-        if self._scheduled_watering_active:
-            print(f"[Scheduled] Hard safety stop at {SCHEDULED_MAX_WATERING_SEC}s.")
-            self._finish_scheduled_watering()
+    def _auto_safety_stop(self) -> None:
+        self._auto_safety_job = None
+        if self._auto_watering_active:
+            print(f"[Auto] Hard safety stop at {MAX_WATERING_SEC}s.")
+            self._finish_auto_watering()
 
-    def _scheduled_watering_monitor(self) -> None:
-        self._scheduled_monitor_job = None
-        if not self._scheduled_watering_active:
+    def _auto_watering_monitor(self) -> None:
+        self._auto_monitor_job = None
+        self._check_auto_watering_stop()
+        if self._auto_watering_active:
+            self._auto_monitor_job = self.after(AUTO_CHECK_INTERVAL_MS, self._auto_watering_monitor)
+
+    def _check_auto_watering_stop(self) -> None:
+        """Apply stop decisions on every fresh reading, before optional recording."""
+        if not self._auto_watering_active:
             return
         try:
-            elapsed = time.monotonic() - self._scheduled_start_time
-            if not self.auto_var.get() or elapsed >= SCHEDULED_MAX_WATERING_SEC:
-                self._finish_scheduled_watering()
+            elapsed = time.monotonic() - self._auto_start_time
+            if not self.auto_var.get() or elapsed >= MAX_WATERING_SEC:
+                self._finish_auto_watering()
                 return
-            if self._scheduled_off_method == "Time":
-                if elapsed >= self._scheduled_duration_sec:
-                    self._finish_scheduled_watering()
+            if self._auto_off_method == "Time":
+                if elapsed >= self._auto_duration_sec:
+                    self._finish_auto_watering()
                     return
             else:
                 stop_target = float(self.soil_water_stop_setpoint.get())
                 moistures = self.telemetry.get("moisture_pct", [])
-                self._scheduled_channels_active = [
-                    ch for ch in self._scheduled_channels_active
+                self._auto_channels_active = [
+                    ch for ch in self._auto_channels_active
                     if ch < len(moistures) and moistures[ch] is not None
                     and moistures[ch] < stop_target
                 ]
-                if not self._scheduled_channels_active:
-                    self._finish_scheduled_watering()
+                if not self._auto_channels_active:
+                    self._finish_auto_watering()
                     return
-            self._apply_scheduled_channels()
+            self._apply_auto_channels()
         except Exception as e:
-            print(f"[Scheduled] Control error; stopping pumps: {e}")
-            self._finish_scheduled_watering()
-            return
+            print(f"[Auto] Control error; stopping pumps: {e}")
+            self._finish_auto_watering()
 
-        # Stop decisions and relay writes precede optional camera/disk work.
-        self._scheduled_monitor_job = self.after(2000, self._scheduled_watering_monitor)
-        if self.camera and self.camera.is_available and self._scheduled_run_dir:
+    def _log_watering_telemetry(self) -> None:
+        data = {**self.telemetry, "relays": "".join(str(var.get()) for var in self.water_vars)}
+        self._log_telemetry_csv(data, data.get("moisture_pct", []))
+
+    def _record_watering_image(self, run_dir: Path) -> None:
+        if self.camera and self.camera.is_available:
             try:
                 clean_frame = self.camera.capture_array()
                 if clean_frame is not None:
-                    img_name = f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                    cv2.imwrite(str(self._scheduled_run_dir / img_name), clean_frame)
+                    img_name = f"IMG_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+                    cv2.imwrite(str(run_dir / img_name), clean_frame)
             except Exception as e:
-                print(f"[Scheduled Monitor] Image capture error: {e}")
+                print(f"[Watering Record] Image capture error: {e}")
 
     def _bind_capture_click_hold(self) -> None:
         def on_press(event=None):
@@ -1721,7 +1751,7 @@ class MainWindow(tk.Tk):
             b.config(state=state, disabledforeground="#9e9e9e")
         # Stop any existing run on either mode transition. Old callbacks must
         # never re-energize pumps after the user has switched to MANUAL.
-        self._finish_scheduled_watering()
+        self._finish_auto_watering()
         for i, job in enumerate(self._relay_timers):
             if job is not None:
                 self.after_cancel(job)
@@ -1783,7 +1813,7 @@ class MainWindow(tk.Tk):
                 mask = "".join(str(v.get()) for v in self.water_vars)
                 self.send_bitmask(mask)
                 # Schedule auto-off after duration
-                duration_ms = max(1, min(SCHEDULED_MAX_WATERING_SEC, self.pump_duration_var.get())) * 1000
+                duration_ms = max(1, min(MAX_WATERING_SEC, self.pump_duration_var.get())) * 1000
                 job = self.after(duration_ms, lambda i=relay_idx: self._auto_off_relay(i))
                 if relay_idx < len(self._relay_timers):
                     self._relay_timers[relay_idx] = job
@@ -1881,6 +1911,36 @@ class MainWindow(tk.Tk):
             if self.water_vars[i].get() != expected:
                 self.water_vars[i].set(expected)
 
+    def _receive_telemetry(self, data: dict, moist: list[float | None]) -> None:
+        """Process each serial frame once, on the Tk thread."""
+        if self.stop_threads.is_set():
+            return
+        self.telemetry = {**data, "moisture_pct": moist}
+        self._telemetry_sequence += 1
+        soil = data.get("soil", [])
+        if soil and len(soil) != len(self.water_vars):
+            self.rebuild_relays(len(soil))
+            self._below_threshold_counts = [0] * len(self.water_vars)
+        self._update_telemetry_ui(data, moist)
+
+        was_watering = self._auto_watering_active
+        run_dir = self._auto_run_dir
+        if was_watering:
+            self._watering_record_count += 1
+            self._check_auto_watering_stop()
+            if self._watering_record_count % WATERING_RECORD_EVERY == 0:
+                # Finish already logs OFF; avoid duplicating that final CSV row.
+                if self._auto_watering_active:
+                    self._log_watering_telemetry()
+                if run_dir:
+                    self._record_watering_image(run_dir)
+        else:
+            # A wet/missing reading between ticker checks breaks the dry streak.
+            setpoint = float(self.soil_water_setpoint.get())
+            for ch in range(len(self._below_threshold_counts)):
+                if not self.auto_var.get() or ch >= len(moist) or moist[ch] is None or moist[ch] >= setpoint:
+                    self._below_threshold_counts[ch] = 0
+
     def _log_telemetry_csv(self, data: dict, moist: list[float | None]) -> None:
         """Append a telemetry record to daily CSV file in TELEMETRY_DIR with a single header row."""
         try:
@@ -1903,8 +1963,8 @@ class MainWindow(tk.Tk):
                     st, at, ah, lv, data.get("relays", "0000"), str(data.get("pan", PAN_HOME)), str(data.get("tilt", TILT_HOME))
                 ]
                 f.write(",".join(row) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Telemetry Logger] Error: {e}")
 
     def _serial_reader(self) -> None:
         rx_buf = ""
@@ -1923,10 +1983,7 @@ class MainWindow(tk.Tk):
                             if data:
                                 soil = data.get("soil", [])
                                 moist = [raw_to_moisture(v, i) for i, v in enumerate(soil)]
-                                self.telemetry = {**data, "moisture_pct": moist}
-                                if soil and len(soil) != len(self.water_vars):
-                                    self.after(0, lambda n=len(soil): self.rebuild_relays(n))
-                                self.after(0, lambda d=data, m=moist: self._update_telemetry_ui(d, m))
+                                self.after(0, lambda d=data, m=moist: self._receive_telemetry(d, m))
                     else:
                         time.sleep(0.05)
                 except Exception:
@@ -2057,10 +2114,10 @@ class MainWindow(tk.Tk):
         for job in (
             getattr(self, "_data_logger_job", None),
             getattr(self, "_image_logger_job", None),
-            getattr(self, "_scheduled_ticker_job", None),
-            getattr(self, "_scheduled_monitor_job", None),
-            getattr(self, "_scheduled_safety_job", None),
-            getattr(self, "_scheduled_time_job", None),
+            getattr(self, "_auto_ticker_job", None),
+            getattr(self, "_auto_monitor_job", None),
+            getattr(self, "_auto_safety_job", None),
+            getattr(self, "_auto_time_job", None),
             *self._relay_timers,
             getattr(self, "_repeat_job", None),
         ):

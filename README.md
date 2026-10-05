@@ -11,12 +11,11 @@ An AI-powered automated irrigation system for **Controlled Environment Agricultu
 - **4 independent irrigation channels** — per-channel soil moisture sensing and pump relay control
 - **AI plant health monitoring** — YOLO inference on Google Coral USB TPU via a pan-tilt camera gimbal
 - **Auto & manual watering modes** — moisture-setpoint-based auto-loop and one-click manual control
-- **Scheduled daily watering** — configurable 10 AM trigger with per-channel target cutoff (default 80%)
+- **Real-time automatic watering** — checks every 2 seconds; starts after 3 consecutive fresh checks below the start threshold; stops each channel on the first reading at its moisture target (default 80%) or after the 60-second safety limit
 - **Real-time telemetry** — soil moisture, soil/air temperature, humidity, and ambient light
 - **Historical data plots** — day / week / month views with water volume tracking per pump
 - **Remote access** — Tailscale VPN for SSH and dashboard access from anywhere
-- **Comprehensive tests** — `pytest` suite covering auto-loop, scheduler, plot, and logger logic
-
+- **Watering records** — telemetry and images saved every second telemetry update during automatic watering; telemetry also records pump starts and stops
 ---
 
 ## Hardware Requirements

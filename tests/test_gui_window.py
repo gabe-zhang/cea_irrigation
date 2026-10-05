@@ -16,7 +16,7 @@ def headless_app():
         with patch.object(MainWindow, "_init_serial"):
             with patch.object(MainWindow, "_camera_loop"), \
                     patch.object(MainWindow, "_start_periodic_loggers"), \
-                    patch.object(MainWindow, "_start_scheduled_ticker"):
+                    patch.object(MainWindow, "_start_auto_ticker"):
                 app = MainWindow()
     app.withdraw()
     app.plant_ai.is_available = False

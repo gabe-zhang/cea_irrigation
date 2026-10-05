@@ -6,8 +6,8 @@ Covers:
 3. Dynamic soil water setpoint (Spinbox DoubleVar) and real-time auto-loop reaction.
 4. Independent periodic data logger and clean image logger timers.
 5. Manual clean frame capture guarantee (no burned AI overlays).
-6. Scheduled daily irrigation ticker (10am CST check, AUTO gate, duplicate prevention).
-7. Scheduled watering monitor (per-channel selective activation, 80% cutoff, 180s safety timeout).
+6. Real-time irrigation ticker (three fresh checks, AUTO gate).
+7. Automatic watering monitor (per-channel activation, target cutoff, 60s safety timeout).
 8. PlotWindow dynamic range switching (trace callback, static Matplotlib in-place rendering).
 9. Shutdown cleanup (canceling all background jobs and safety shutoff).
 """
@@ -27,8 +27,8 @@ import gui.psc_irr_gui as psc_mod
 from gui.psc_irr_gui import (
     MainWindow,
     PlotWindow,
-    SCHEDULED_MAX_WATERING_SEC,
-    SCHEDULED_TARGET_PCT,
+    MAX_WATERING_SEC,
+    AUTO_TARGET_PCT,
     SOIL_WATER_SETPOINT,
     parse_interval_to_ms,
     read_historical_telemetry,
@@ -187,15 +187,16 @@ def test_read_historical_telemetry_corrupt_and_edge_cases(tmp_path):
 # --- 3. Dynamic Setpoint & Auto-Loop Reaction ---
 
 @pytest.fixture
-def headless_gui():
+def headless_gui(tmp_path, monkeypatch):
     """Create headless MainWindow instance with background loops mocked."""
     with patch("gui.psc_irr_gui.Camera"), patch("gui.psc_irr_gui.PlantAIDetector"):
         with patch.object(MainWindow, "_init_serial"):
             with patch.object(MainWindow, "_camera_loop"):
                 with patch.object(MainWindow, "_start_periodic_loggers"):
-                    with patch.object(MainWindow, "_start_scheduled_ticker"):
+                    with patch.object(MainWindow, "_start_auto_ticker"):
                         app = MainWindow()
     app.withdraw()
+    monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
     yield app
     try:
         app.destroy()
@@ -282,44 +283,27 @@ def test_manual_clean_frame_capture(headless_gui, tmp_path, monkeypatch):
             assert len(saved_images) == 1
 
 
-# --- 5. Scheduled Daily Irrigation Tests ---
+# --- 5. Automatic Irrigation Tests ---
 
-def test_scheduled_irrigation_ticker_auto_vs_manual(headless_gui):
+def test_auto_irrigation_ticker_auto_vs_manual(headless_gui):
     app = headless_gui
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    # Simulate 10:00 AM clock
-    mock_now = MagicMock()
-    mock_now.hour = 10
-    mock_now.minute = 0
-    mock_now.strftime.return_value = today
-
-    with patch("gui.psc_irr_gui.datetime") as mock_dt:
-        mock_dt.now.return_value = mock_now
-
-        # Case 1: Mode is MANUAL -> check is skipped with log
+    app.telemetry["moisture_pct"] = [30, 100, 100, 100]
+    with patch.object(app, "after"), patch.object(app, "_start_auto_watering") as start:
         app.auto_var.set(0)
-        with patch.object(app, "_start_scheduled_watering") as mock_start:
-            app._scheduled_check_ticker()
-            mock_start.assert_not_called()
-            assert app._last_scheduled_date == today
-
-        # Case 2: Already ran today -> does not trigger again
+        app._telemetry_sequence += 1
+        app._auto_check_ticker()
+        start.assert_not_called()
+        assert app._below_threshold_counts == [0] * 4
         app.auto_var.set(1)
-        with patch.object(app, "_start_scheduled_watering") as mock_start:
-            app._scheduled_check_ticker()
-            mock_start.assert_not_called()
-
-        # Case 3: New day and AUTO is ON -> triggers watering!
-        app._last_scheduled_date = "2026-09-09"
-        with patch.object(app, "_start_scheduled_watering") as mock_start:
-            app._scheduled_check_ticker()
-            mock_start.assert_called_with(today)
+        for _ in range(3):
+            app._telemetry_sequence += 1
+            app._auto_check_ticker()
+        assert app._below_threshold_counts == [3, 0, 0, 0]
 
 
-def test_scheduled_watering_selective_channels_and_target_cutoff(headless_gui, tmp_path, monkeypatch):
+def test_auto_watering_selective_channels_and_target_cutoff(headless_gui, tmp_path, monkeypatch):
     app = headless_gui
-    monkeypatch.setattr(psc_mod, "SCHEDULED_WATERING_DIR", tmp_path)
+    monkeypatch.setattr(psc_mod, "AUTO_WATERING_DIR", tmp_path)
     app.ser = MagicMock()
     app.ser.is_open = True
     app.camera.is_available = True
@@ -329,45 +313,45 @@ def test_scheduled_watering_selective_channels_and_target_cutoff(headless_gui, t
     app.soil_water_setpoint.set(40.0)
     # Channel 0: 32% (<40 -> water), Channel 1: 55% (>=40 -> leave), Channel 2: 36% (<40 -> water), Channel 3: 45% (>=40 -> leave)
     app.telemetry["moisture_pct"] = [32.0, 55.0, 36.0, 45.0]
+    app._below_threshold_counts = [3, 0, 3, 0]
 
     with patch.object(app, "after") as mock_after:
-        app._start_scheduled_watering()
-        assert app._scheduled_watering_active is True
-        assert app._scheduled_channels_active == [0, 2]
+        app._start_auto_watering()
+        assert app._auto_watering_active is True
+        assert app._auto_channels_active == [0, 2]
         # Only channels 0 and 2 energized: bitmask '1010'
         app.ser.write.assert_called_with(b"1010\n")
         assert [v.get() for v in app.water_vars] == [1, 0, 1, 0]
         # Dedicated timestamped run directory created
-        assert app._scheduled_run_dir is not None
-        assert app._scheduled_run_dir.exists()
-        mock_after.assert_called_with(2000, app._scheduled_watering_monitor)
+        assert app._auto_run_dir is not None
+        assert app._auto_run_dir.exists()
+        mock_after.assert_called_with(2000, app._auto_watering_monitor)
 
     # Monitor Tick 1: Channel 0 reaches 82% (>= 80% cutoff), Channel 2 reaches 65% (<80%)
     app.telemetry["moisture_pct"] = [82.0, 55.0, 65.0, 45.0]
     with patch.object(app, "after") as mock_after:
-        app._scheduled_watering_monitor()
+        app._auto_watering_monitor()
         # Channel 0 de-energized, only channel 2 remains active
-        assert app._scheduled_channels_active == [2]
+        assert app._auto_channels_active == [2]
         assert [v.get() for v in app.water_vars] == [0, 0, 1, 0]
         app.ser.write.assert_called_with(b"0010\n")
-        # An image was captured to the run directory
-        saved_imgs = list(app._scheduled_run_dir.glob("IMG_*.jpg"))
-        assert len(saved_imgs) == 1
+        # Recording follows fresh telemetry frames, not monitor timer ticks.
+        app.camera.capture_array.assert_not_called()
 
     # Monitor Tick 2: Channel 2 reaches 80.5% (>= 80% cutoff)
     app.telemetry["moisture_pct"] = [82.0, 55.0, 80.5, 45.0]
     with patch.object(app, "after"):
-        app._scheduled_watering_monitor()
+        app._auto_watering_monitor()
         # All channels reached target: all pumps OFF, watering session complete!
-        assert app._scheduled_watering_active is False
-        assert app._scheduled_channels_active == []
+        assert app._auto_watering_active is False
+        assert app._auto_channels_active == []
         assert [v.get() for v in app.water_vars] == [0, 0, 0, 0]
         app.ser.write.assert_called_with(b"0000\n")
 
 
-def test_scheduled_watering_safety_timeout(headless_gui, tmp_path, monkeypatch):
+def test_auto_watering_safety_timeout(headless_gui, tmp_path, monkeypatch):
     app = headless_gui
-    monkeypatch.setattr(psc_mod, "SCHEDULED_WATERING_DIR", tmp_path)
+    monkeypatch.setattr(psc_mod, "AUTO_WATERING_DIR", tmp_path)
     app.ser = MagicMock()
     app.ser.is_open = True
     app.camera.is_available = True
@@ -375,21 +359,22 @@ def test_scheduled_watering_safety_timeout(headless_gui, tmp_path, monkeypatch):
 
     app.soil_water_setpoint.set(40.0)
     app.telemetry["moisture_pct"] = [35.0, 50.0, 50.0, 50.0]
+    app._below_threshold_counts = [3, 0, 0, 0]
 
     with patch.object(app, "after"):
-        app._start_scheduled_watering()
-        assert app._scheduled_watering_active is True
-        assert app._scheduled_channels_active == [0]
+        app._start_auto_watering()
+        assert app._auto_watering_active is True
+        assert app._auto_channels_active == [0]
 
-    # Simulate elapsed time surpassing 180s (e.g. 182 seconds) while channel is still at 60%
-    app._scheduled_start_time = time.monotonic() - (SCHEDULED_MAX_WATERING_SEC + 2)
+    # Simulate elapsed time surpassing the safety limit while still below target.
+    app._auto_start_time = time.monotonic() - (MAX_WATERING_SEC + 2)
     app.telemetry["moisture_pct"] = [60.0, 50.0, 50.0, 50.0]
 
     with patch.object(app, "after"):
-        app._scheduled_watering_monitor()
+        app._auto_watering_monitor()
         # Safety timeout reached: pumps forcibly stopped and active state cleared
-        assert app._scheduled_watering_active is False
-        assert app._scheduled_channels_active == []
+        assert app._auto_watering_active is False
+        assert app._auto_channels_active == []
         assert [v.get() for v in app.water_vars] == [0, 0, 0, 0]
         app.ser.write.assert_called_with(b"0000\n")
 

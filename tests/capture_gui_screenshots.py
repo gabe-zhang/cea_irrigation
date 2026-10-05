@@ -66,7 +66,7 @@ def main():
         stack.enter_context(patch.object(gui, "TELEMETRY_DIR", telemetry_dir))
         stack.enter_context(patch.object(gui, "Camera"))
         stack.enter_context(patch.object(gui, "PlantAIDetector"))
-        for name in ("_init_serial", "_camera_loop", "_start_periodic_loggers", "_start_scheduled_ticker"):
+        for name in ("_init_serial", "_camera_loop", "_start_periodic_loggers", "_start_auto_ticker"):
             stack.enter_context(patch.object(gui.MainWindow, name))
         app = gui.MainWindow()
         try:
