@@ -70,6 +70,7 @@ HUMIDITY_COLOR = "#00838f"
 LIGHT_COLOR = "#FFD700"
 DARK_YELLOW = "#B8860B"
 LIGHT_AXIS_MAX_LUX = 4000
+OUTPUT_FONT = ("arial", 20, "bold")
 SENSOR_DOTS = {"marker": "o", "linestyle": "None", "markersize": 4}
 
 # Constants & Soil Calibration
@@ -102,6 +103,22 @@ GIMBAL_STEP = 5  # degrees per nudge click
 # Interval mapping
 DATA_INTERVAL_MAP = {"10s": 10_000, "1min": 60_000, "1hr": 3_600_000}
 IMAGE_INTERVAL_MAP = {"1sec": 1_000, "1min": 60_000, "1hr": 3_600_000, "1day": 86_400_000}
+
+
+def style_dropdown(widget: tk.OptionMenu, variable: tk.StringVar) -> None:
+    """Decorate the selected label while leaving menu values and callbacks intact."""
+    display = tk.StringVar(widget)
+
+    def refresh(*_args):
+        display.set(f"{variable.get()} ▼")
+
+    trace = variable.trace_add("write", refresh)
+    widget.configure(indicatoron=False, textvariable=display)
+    # Keep the display variable alive and remove its source trace with the widget.
+    widget._arrow_display = display
+    widget.bind("<Destroy>", lambda event: variable.trace_remove("write", trace)
+                if event.widget is widget else None, add="+")
+    refresh()
 
 
 def legend_strokes(artists):
@@ -1204,13 +1221,13 @@ class MainWindow(tk.Tk):
             bg="white", width=4, anchor="e"
         ).pack(side=tk.LEFT, padx=(1, 0))
         self.btn_start_down = tk.Button(
-            turn_on_row, text="⮜", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
+            turn_on_row, text="▼", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
             activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
             command=lambda: self._adjust_start_setpoint(-5.0)
         )
         self.btn_start_down.pack(side=tk.LEFT, padx=(2, 0))
         self.btn_start_up = tk.Button(
-            turn_on_row, text="⮞", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
+            turn_on_row, text="▲", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
             activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
             command=lambda: self._adjust_start_setpoint(5.0)
         )
@@ -1232,13 +1249,14 @@ class MainWindow(tk.Tk):
             self.off_method_dropdown["menu"].config(font=("arial", 14, "bold"))
         except Exception:
             pass
+        style_dropdown(self.off_method_dropdown, self.off_method_var)
         self.off_method_dropdown.pack(side=tk.LEFT, padx=(0, 2))
         tk.Label(
             turn_off_row, textvariable=self.off_value_display, font=("arial", 16, "bold"),
             bg="white", width=5, anchor="e"
         ).pack(side=tk.LEFT, padx=(1, 0))
         self.btn_off_down = tk.Button(
-            turn_off_row, text="⮜", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
+            turn_off_row, text="▼", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
             activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
             command=lambda: self._adjust_off_value(
                 -5.0 if self.off_method_var.get() == "SW" else -1
@@ -1246,7 +1264,7 @@ class MainWindow(tk.Tk):
         )
         self.btn_off_down.pack(side=tk.LEFT, padx=(2, 0))
         self.btn_off_up = tk.Button(
-            turn_off_row, text="⮞", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
+            turn_off_row, text="▲", font=("arial", 14, "bold"), width=1, bd=2, bg="#f1f3f5",
             activebackground="#ced4da", repeatdelay=400, repeatinterval=150,
             command=lambda: self._adjust_off_value(
                 5.0 if self.off_method_var.get() == "SW" else 1
@@ -1304,6 +1322,7 @@ class MainWindow(tk.Tk):
         self.plot_range_dropdown = tk.OptionMenu(range_box, self.plot_range_var, "min", "day", "week", "month", "period")
         self.plot_range_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=7, pady=3)
         self.plot_range_dropdown["menu"].config(font=("arial", 15, "bold"))
+        style_dropdown(self.plot_range_dropdown, self.plot_range_var)
         self.plot_range_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self._date_range_frame = tk.Frame(self.card_data, bg="white", height=44)
@@ -1331,15 +1350,17 @@ class MainWindow(tk.Tk):
             side=tk.LEFT, padx=(4, 2),
         )
         self.data_record_dropdown = tk.OptionMenu(self.data_record_frame, self.data_record_var, "10s", "1min", "1hr")
-        self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=4, pady=3)
+        self.data_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=7, pady=3)
         self.data_record_dropdown["menu"].config(font=("arial", 15, "bold"))
+        style_dropdown(self.data_record_dropdown, self.data_record_var)
         self.data_record_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(self.image_record_frame, text="Image:", font=("arial", 18, "bold"), bg="white", anchor="w", width=6).pack(
             side=tk.LEFT, padx=(4, 2),
         )
         self.image_record_dropdown = tk.OptionMenu(self.image_record_frame, self.image_record_var, "1sec", "1min", "1hr", "1day")
-        self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=4, pady=3)
+        self.image_record_dropdown.config(font=("arial", 17, "bold"), bg="#f8f9fa", width=7, pady=3)
         self.image_record_dropdown["menu"].config(font=("arial", 15, "bold"))
+        style_dropdown(self.image_record_dropdown, self.image_record_var)
         self.image_record_dropdown.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.plot_range_var.trace_add("write", self._on_plot_range_changed)
         self._on_plot_range_changed()
@@ -1508,24 +1529,24 @@ class MainWindow(tk.Tk):
 
         row1 = tk.Frame(bar, bg="#1a1d20")
         row1.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(6, 0))
-        tk.Label(row1, text="ENV:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(row1, text="ENV:", font=OUTPUT_FONT, fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
 
-        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=("arial", 16, "bold"), fg=DARK_YELLOW, bg="#1a1d20")
-        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=("arial", 16, "bold"), fg="#06d6a0", bg="#1a1d20")
-        self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=("arial", 16, "bold"), fg="#4cc9f0", bg="#1a1d20")
-        self.lbl_light = tk.Label(row1, text="Light: -- lux", font=("arial", 16, "bold"), fg="#f72585", bg="#1a1d20")
+        self.lbl_soil_temp = tk.Label(row1, text="Soil: --.-°C", font=OUTPUT_FONT, fg=SOIL_TEMP_COLOR, bg="#1a1d20")
+        self.lbl_air_temp = tk.Label(row1, text="Air: --.-°C", font=OUTPUT_FONT, fg=AIR_TEMP_COLOR, bg="#1a1d20")
+        self.lbl_air_humi = tk.Label(row1, text="RH: --.-%", font=OUTPUT_FONT, fg=HUMIDITY_COLOR, bg="#1a1d20")
+        self.lbl_light = tk.Label(row1, text="Light: -- lux", font=OUTPUT_FONT, fg=LIGHT_COLOR, bg="#1a1d20")
         
         tpu_init_text = "AI: Ready" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "TPU: Disconnected"
         tpu_init_color = "#06d6a0" if getattr(self, "plant_ai", None) and self.plant_ai.is_available else "#e63946"
-        self.lbl_tpu_status = tk.Label(row1, text=tpu_init_text, font=("arial", 16, "bold"), fg=tpu_init_color, bg="#1a1d20")
+        self.lbl_tpu_status = tk.Label(row1, text=tpu_init_text, font=OUTPUT_FONT, fg=tpu_init_color, bg="#1a1d20")
 
         for lbl in (self.lbl_soil_temp, self.lbl_air_temp, self.lbl_air_humi, self.lbl_light, self.lbl_tpu_status):
             lbl.pack(side=tk.LEFT, padx=10)
 
         row2 = tk.Frame(bar, bg="#1a1d20")
         row2.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(2, 6))
-        tk.Label(row2, text="Soil moisture:", font=("arial", 16, "bold"), fg="#90e0ef", bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
-        self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=("arial", 16, "bold"), fg=DARK_YELLOW, bg="#1a1d20")
+        tk.Label(row2, text="Soil moisture:", font=OUTPUT_FONT, fg=DARK_YELLOW, bg="#1a1d20").pack(side=tk.LEFT, padx=(0, 12))
+        self.lbl_soil_moist = tk.Label(row2, text="S1: --  |  S2: --  |  S3: --  |  S4: --", font=OUTPUT_FONT, fg="white", bg="#1a1d20")
         self.lbl_soil_moist.pack(side=tk.LEFT, padx=10)
 
     def _start_periodic_loggers(self) -> None:

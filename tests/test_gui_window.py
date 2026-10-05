@@ -557,3 +557,102 @@ def test_plot_window_historical_water_volume_axis_and_bars(headless_app, tmp_pat
     assert legend_labels == ["S1", "S2", "S3", "S4"]
 
     plotter.toggle(False)
+
+
+@pytest.mark.parametrize("widget_name,variable_name", [
+    ("off_method_dropdown", "off_method_var"),
+    ("plot_range_dropdown", "plot_range_var"),
+    ("data_record_dropdown", "data_record_var"),
+    ("image_record_dropdown", "image_record_var"),
+])
+def test_dropdown_arrows_preserve_menu_values(headless_app, widget_name, variable_name):
+    app = headless_app
+    widget, variable = getattr(app, widget_name), getattr(app, variable_name)
+    assert not widget["indicatoron"]
+    menu = widget["menu"]
+    for index in range(menu.index("end") + 1):
+        value = menu.entrycget(index, "label")
+        assert "▼" not in value
+        menu.invoke(index)
+        assert variable.get() == value
+        assert widget["text"] == f"{value} ▼"
+        variable.set(value)
+        assert widget["text"] == f"{value} ▼"
+        if variable_name == "plot_range_var":
+            assert bool(app.range_summary_var.get()) == (value != "min")
+        elif variable_name == "off_method_var":
+            assert app.off_value_display.get().endswith("sec" if value == "Time" else "%")
+
+
+def test_dropdown_helper_preserves_command_and_cleans_up_trace(headless_app):
+    variable = tk.StringVar(headless_app, value="first")
+    callback = MagicMock()
+    widget = tk.OptionMenu(headless_app, variable, "first", "second", command=callback)
+    traces = variable.trace_info()
+    psc_mod.style_dropdown(widget, variable)
+    widget["menu"].invoke(1)
+    callback.assert_called_once_with("second")
+    assert variable.get() == "second"
+    assert widget["text"] == "second ▼"
+    widget.destroy()
+    assert variable.trace_info() == traces
+
+
+@pytest.mark.parametrize("variable_name,down_name,up_name,initial,step,low,high,method", [
+    ("soil_water_setpoint", "btn_start_down", "btn_start_up", 40, 5, 10, 90, "SW"),
+    ("soil_water_stop_setpoint", "btn_off_down", "btn_off_up", 80, 5, 10, 100, "SW"),
+    ("pump_duration_var", "btn_off_down", "btn_off_up", 10, 1, 1, 60, "Time"),
+])
+def test_adjustment_arrows_keep_steps_bounds_and_repeat(
+        headless_app, variable_name, down_name, up_name, initial, step, low, high, method):
+    app = headless_app
+    app.off_method_var.set(method)
+    variable = getattr(app, variable_name)
+    down, up = getattr(app, down_name), getattr(app, up_name)
+    assert down["text"] == "▼" and up["text"] == "▲"
+    for button in (down, up):
+        assert button["repeatdelay"] == 400
+        assert button["repeatinterval"] == 150
+    variable.set(initial)
+    down.invoke()
+    assert variable.get() == initial - step
+    up.invoke()
+    assert variable.get() == initial
+    variable.set(low)
+    down.invoke()
+    assert variable.get() == low
+    variable.set(high)
+    up.invoke()
+    assert variable.get() == high
+
+
+def test_output_font_colors_and_fit(headless_app):
+    from tkinter.font import Font
+
+    app = headless_app
+    app.geometry("1920x1005+0+0")
+    app.deiconify()
+    app._update_telemetry_ui(
+        {"soil_temp": 22.4, "temp": 24.1, "humidity": 58.2, "light": 1240},
+        [42.1, 38.5, 51.0, 44.2],
+    )
+    app.lbl_tpu_status.configure(text="TPU: Disconnected")
+    app.update_idletasks()
+    for label, color in ((app.lbl_soil_temp, psc_mod.SOIL_TEMP_COLOR),
+                         (app.lbl_air_temp, psc_mod.AIR_TEMP_COLOR),
+                         (app.lbl_air_humi, psc_mod.HUMIDITY_COLOR),
+                         (app.lbl_light, psc_mod.LIGHT_COLOR),
+                         (app.lbl_soil_moist, "white")):
+        assert label["fg"] == color
+    for row in (app.lbl_soil_temp.master, app.lbl_soil_moist.master):
+        for label in row.winfo_children():
+            font = Font(app, font=label["font"])
+            assert app.tk.splitlist(label["font"])[0].lower() == "arial"
+            assert font.actual("size") == 20
+            assert font.actual("weight") == "bold"
+            assert label.winfo_width() >= label.winfo_reqwidth()
+            assert label.winfo_height() >= label.winfo_reqheight()
+            assert label.winfo_rootx() + label.winfo_width() <= app.btn_exit.winfo_rootx()
+            assert label.winfo_rooty() + label.winfo_height() <= row.master.winfo_rooty() + row.master.winfo_height()
+    heading = app.lbl_soil_moist.master.winfo_children()[0]
+    assert heading["fg"] == psc_mod.DARK_YELLOW
