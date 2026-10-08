@@ -35,6 +35,7 @@ from tkinter import filedialog, ttk
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.logging_config import configure_logging, install_exception_hooks
+from scripts.safety_state import SafetyState, SAFETY_TAGS
 
 logger = logging.getLogger("cea_irrigation.gui")
 try:
@@ -205,7 +206,7 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
             if tag == "soil":
                 soil_vals, j = [], i + 1
                 while j < n and len(soil_vals) < 4:
-                    if tokens[j].lower() in ("soil_temp", "temp", "air_temp", "humi", "humidity", "light", "relays", "pan", "tilt"):
+                    if tokens[j].lower() in ("soil_temp", "temp", "air_temp", "humi", "humidity", "light", "relays", "pan", "tilt", *SAFETY_TAGS):
                         break
                     soil_vals.append(_safe_int(tokens[j]))
                     j += 1
@@ -231,6 +232,9 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
                 i += 2
             elif tag == "tilt" and i + 1 < n:
                 data["tilt"] = _safe_int(tokens[i + 1])
+                i += 2
+            elif tag in SAFETY_TAGS and i + 1 < n:
+                data[tag] = tokens[i + 1]
                 i += 2
             else:
                 i += 1
@@ -998,6 +1002,10 @@ class MainWindow(tk.Tk):
             "temp": None, "humidity": None, "light": None,
             "relays": "0000", "pan": PAN_HOME, "tilt": TILT_HOME
         }
+        self.safety = SafetyState()
+        self._safety_window = None
+        self._safety_warning_shown = False
+        self._safety_error = None
         self.current_pan, self.current_tilt = PAN_HOME, TILT_HOME
         self._repeat_job: str | None = None
         self._data_logger_job: str | None = None
@@ -1095,6 +1103,7 @@ class MainWindow(tk.Tk):
 
         # Build Sidebar Cards
         self._build_sidebar_cards()
+        self._build_safety_warning()
 
         self.plotter = PlotWindow(
             self,
@@ -1112,6 +1121,127 @@ class MainWindow(tk.Tk):
         self._camera_loop()
         self._start_periodic_loggers()
         self._start_auto_ticker()
+
+    def _build_safety_warning(self) -> None:
+        self.safety_banner = tk.Label(self.sidebar_content, wraplength=self.margin_w - 40,
+                                      bg="#fff3cd", fg="#842029", font=("arial", 14, "bold"),
+                                      justify=tk.LEFT, padx=8, pady=8)
+        self.safety_banner.pack(fill=tk.X, padx=10, pady=5, before=self.sidebar_content.winfo_children()[0])
+        self.safety_banner.bind("<Button-1>", lambda _event: self._show_safety_warning())
+        self._refresh_safety_ui()
+
+    def _refresh_safety_ui(self) -> None:
+        if self.safety.locked:
+            context = self.safety.state["context"]
+            mask = context.get("channel_mask", 0)
+            channels = ", ".join(f"W{i + 1}" for i in range(4) if mask & (1 << i))
+            detail = f" ({channels})" if channels else ""
+            reason = {"safety_timeout": "Watering reached the 60-second safety limit",
+                      "firmware_timeout": "A pump reached the 60-second safety limit",
+                      "controller_lock": "Controller safety stop",
+                      "state_unavailable": "Saved safety status cannot be read"}.get(
+                          context.get("reason"), "Controller safety stop")
+            if context.get("source") == 3:
+                reason = "Saved controller safety state needs recovery"
+            text = f"ALL PUMPS LOCKED{detail}\n{reason}\n"
+            text += f"Triggered: {context.get('timestamp', 'unknown time')}\n"
+            text += "Check water, tubing, pump and sensor. Click for Resolved."
+            if not self.safety.online:
+                text += "\nWaiting for current controller status before reset."
+            if self._safety_error:
+                text += "\n" + self._safety_error
+        elif self.safety.storage_error:
+            text = self.safety.storage_error
+        elif not self.safety.can_water:
+            text = "Watering paused: waiting for current safety status from the controller."
+        else:
+            text = ""
+        self.safety_banner.configure(text=text)
+        if text:
+            self.safety_banner.pack(fill=tk.X, padx=10, pady=5, before=self.sidebar_content.winfo_children()[0])
+        else:
+            self.safety_banner.pack_forget()
+        for button in self.water_btns:
+            button.configure(state=tk.NORMAL if self.safety.can_water and not self.auto_var.get() else tk.DISABLED)
+        if self.safety.locked and not self._safety_warning_shown:
+            self._show_safety_warning()
+        if self._safety_window and self._safety_window.winfo_exists():
+            self._safety_message.set(text + ("\nReset requested; waiting for confirmation."
+                                           if self.safety.reset_generation is not None else ""))
+            self._safety_resolve_button.configure(state=tk.NORMAL if self.safety.online and self.safety.locked
+                and not self.safety.state["pending_trip"] else tk.DISABLED)
+            if not self.safety.locked and not self.safety.storage_error:
+                self._safety_window.destroy()
+                self._safety_window = None
+                self._safety_warning_shown = False
+
+    def _show_safety_warning(self) -> None:
+        if not self.safety.locked:
+            return
+        if self._safety_window and self._safety_window.winfo_exists():
+            self._safety_window.lift()
+            return
+        self._safety_warning_shown = True
+        self._safety_window = tk.Toplevel(self)
+        self._safety_window.title("Pump safety stop — all pumps locked")
+        self._safety_window.transient(self)
+        self._safety_message = tk.StringVar(value=self.safety_banner.cget("text"))
+        tk.Label(self._safety_window, textvariable=self._safety_message, wraplength=440,
+                 justify=tk.LEFT, font=("arial", 14), padx=18, pady=18).pack()
+        self._safety_resolve_button = tk.Button(self._safety_window, text="Resolved — resume watering",
+            command=self._resolve_safety, state=tk.NORMAL if self.safety.online and not self.safety.state["pending_trip"] else tk.DISABLED)
+        self._safety_resolve_button.pack(padx=18, pady=(0, 18))
+
+    def _inhibit_watering(self) -> None:
+        for i, job in enumerate(self._relay_timers):
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+                self._relay_timers[i] = None
+        self._finish_auto_watering(reason="safety_lock" if self.safety.locked else "safety_status_unavailable")
+
+    def _resolve_safety(self) -> None:
+        command = self.safety.resolve_command()
+        if command is None or not self.ser or not self.ser.is_open:
+            self.safety.reset_generation = None
+            self._safety_error = "Reset unavailable. Reconnect the controller and try again."
+            logger.warning("Safety reset unavailable; lock remains active", extra={"event": "safety.resolve_unavailable"})
+            self._refresh_safety_ui()
+            return
+        self._inhibit_watering()
+        self._safety_error = None
+        if not self.send_command(command):
+            self.safety.reset_generation = None
+            self._safety_error = "Reset command failed. The safety lock remains active."
+            logger.error(self._safety_error, extra={"event": "safety.resolve_failed"})
+        self._refresh_safety_ui()
+
+    def _sync_safety(self, data: dict) -> None:
+        was_locked = self.safety.locked
+        action = self.safety.observe(data)
+        if (self.safety.locked and not was_locked or not self.safety.can_water
+                and (self._auto_watering_active or any(v.get() for v in self.water_vars))):
+            self._inhibit_watering()
+        if action == "trip":
+            self.send_command(self.safety.trip_command())
+        if action == "resolved":
+            self._safety_error = None
+            self._below_threshold_counts = [0] * len(self.water_vars)
+            self._auto_checked_sequence = self._telemetry_sequence + 1
+            self._safety_warning_shown = False
+        if self.safety.locked and data.get("relays") == "0000" and getattr(self, "_safety_off_generation", None) != self.safety.state["generation"]:
+            self._safety_off_generation = self.safety.state["generation"]
+            logger.info("Controller reports all relay outputs OFF", extra={"event": "safety.outputs_off", "context": self.safety.state})
+        self._refresh_safety_ui()
+
+    def _receive_safety_error(self, message: str) -> None:
+        if self.stop_threads.is_set():
+            return
+        self.safety.reset_failed(message)
+        self._safety_error = "Controller rejected the safety operation. The lock remains active."
+        self._refresh_safety_ui()
 
     def _adjust_stop_setpoint(self, delta: float) -> None:
         try:
@@ -1593,7 +1723,8 @@ class MainWindow(tk.Tk):
         try:
             fresh = self._telemetry_sequence != self._auto_checked_sequence
             self._auto_checked_sequence = self._telemetry_sequence
-            if not self.auto_var.get() or self._auto_watering_active or not fresh:
+            self._refresh_safety_ui()
+            if not self.safety.can_water or not self.auto_var.get() or self._auto_watering_active or not fresh:
                 self._below_threshold_counts = [0] * len(self.water_vars)
                 return
             moistures = self.telemetry.get("moisture_pct", [])
@@ -1613,7 +1744,7 @@ class MainWindow(tk.Tk):
             self._start_auto_ticker()
 
     def _start_auto_watering(self) -> None:
-        if not self.auto_var.get() or self._auto_watering_active:
+        if not self.safety.can_water or not self.auto_var.get() or self._auto_watering_active:
             return
         moistures = self.telemetry.get("moisture_pct", [])
         setpoint = float(self.soil_water_setpoint.get())
@@ -1706,8 +1837,21 @@ class MainWindow(tk.Tk):
     def _auto_safety_stop(self) -> None:
         self._auto_safety_job = None
         if self._auto_watering_active:
+            # At a shared deadline, planned Time completion is an ordinary stop.
+            # A firmware timeout reported independently still always locks.
+            if self._auto_off_method == "Time" and time.monotonic() - self._auto_start_time >= self._auto_duration_sec:
+                self._finish_auto_watering()
+                return
+            channels = list(self._auto_channels_active)
+            self.safety.trip({"reason": "safety_timeout", "channel_mask": sum(1 << ch for ch in channels),
+                "run_id": self._auto_run_dir.name if self._auto_run_dir else None,
+                "elapsed_sec": time.monotonic() - self._auto_start_time,
+                "moisture_pct": self.telemetry.get("moisture_pct", [])},
+                stop=lambda: self._finish_auto_watering(reason="safety_timeout"))
             logger.warning("Hard watering safety timeout reached", extra={"event": "watering.safety_stop", "context": {"timeout_sec": MAX_WATERING_SEC}})
-            self._finish_auto_watering(reason="safety_timeout")
+            self._inhibit_watering()
+            self.send_command(self.safety.trip_command())
+            self._refresh_safety_ui()
 
     def _auto_watering_monitor(self) -> None:
         self._auto_monitor_job = None
@@ -1724,14 +1868,14 @@ class MainWindow(tk.Tk):
             if not self.auto_var.get():
                 self._finish_auto_watering(reason="mode_changed")
                 return
-            if elapsed >= MAX_WATERING_SEC:
-                self._auto_safety_stop()
-                return
             if self._auto_off_method == "Time":
                 if elapsed >= self._auto_duration_sec:
                     self._finish_auto_watering()
                     return
-            else:
+            if elapsed >= MAX_WATERING_SEC:
+                self._auto_safety_stop()
+                return
+            if self._auto_off_method != "Time":
                 stop_target = float(self.soil_water_stop_setpoint.get())
                 moistures = self.telemetry.get("moisture_pct", [])
                 previous_channels = self._auto_channels_active
@@ -1806,7 +1950,7 @@ class MainWindow(tk.Tk):
         self.water_btns.clear()
         self.water_vars.clear()
         relays_str = self.telemetry.get("relays", "")
-        state = tk.DISABLED if self.auto_var.get() else tk.NORMAL
+        state = tk.DISABLED if self.auto_var.get() or not self.safety.can_water else tk.NORMAL
         n = max(1, min(5, count))
 
         for i in range(n):
@@ -1837,7 +1981,7 @@ class MainWindow(tk.Tk):
             # In Manual: force Time turn-off and disable dropdown
             self.off_method_var.set("Time")
         self._on_irr_mode_change()
-        state = tk.DISABLED if is_auto else tk.NORMAL
+        state = tk.DISABLED if is_auto or not self.safety.can_water else tk.NORMAL
         for b in self.water_btns:
             b.config(state=state, disabledforeground="#9e9e9e")
         # Stop any existing run on either mode transition. Old callbacks must
@@ -1887,7 +2031,7 @@ class MainWindow(tk.Tk):
 
     def _send_manual_relays(self, relay_idx: int | None = None) -> None:
         """Handle manual relay toggle. Always time-based one-shot in manual mode."""
-        if self.auto_var.get():
+        if not self.safety.can_water or self.auto_var.get():
             return
         if relay_idx is not None:
             # One-shot timed run for this relay
@@ -1928,10 +2072,13 @@ class MainWindow(tk.Tk):
     def send_bitmask(self, bitmask: str) -> None:
         self.send_command(bitmask)
 
-    def send_command(self, cmd: str) -> None:
+    def send_command(self, cmd: str) -> bool:
         command = cmd.strip()
         is_bitmask = bool(command) and all(c in "01" for c in command)
         is_stop = is_bitmask and "1" not in command
+        if is_bitmask and not is_stop and not self.safety.can_water:
+            logger.warning("Pump ON command blocked by safety state", extra={"event": "safety.command_blocked", "context": {"command": command}})
+            return False
         if self.ser and self.ser.is_open:
             try:
                 with self.serial_lock:
@@ -1943,12 +2090,14 @@ class MainWindow(tk.Tk):
                            extra={"event": "serial.command_sent", "context": {"command": command}})
                 if is_bitmask:
                     self._last_logged_bitmask = command
+                return True
             except Exception:
                 logger.log(logging.CRITICAL if is_stop else logging.ERROR, "Serial command failed", exc_info=True,
                            extra={"event": "serial.write_failed", "context": {"command": command}, "rate_limit": True})
         else:
             logger.log(logging.CRITICAL if is_stop else logging.WARNING, "Cannot send command; serial connection unavailable",
                        extra={"event": "serial.command_unavailable", "context": {"command": command}, "rate_limit": True})
+        return False
 
     def _start_repeat(self, action_fn) -> None:
         """Execute action immediately, then schedule repeated execution while held."""
@@ -1998,6 +2147,8 @@ class MainWindow(tk.Tk):
             self.ser = serial.Serial(port=port, baudrate=BAUDRATE, timeout=1.0)
             time.sleep(2.0)
             self.ser.reset_input_buffer()
+            self.send_bitmask("0000")
+            self.send_command("safety status")
             logger.info("Serial connection opened", extra={"event": "serial.connected", "context": {"port": port, "baud": BAUDRATE}})
             threading.Thread(target=self._serial_reader, name="serial-reader", daemon=True).start()
         except Exception:
@@ -2024,6 +2175,7 @@ class MainWindow(tk.Tk):
         if self.stop_threads.is_set():
             return
         self.telemetry = {**data, "moisture_pct": moist}
+        self._sync_safety(data)
         previous_relays = getattr(self, "_last_observed_relays", None)
         if data.get("relays") != previous_relays:
             logger.info("Device reported relay state", extra={"event": "serial.relay_state", "context": {"previous": previous_relays, "relays": data.get("relays")}})
@@ -2099,6 +2251,8 @@ class MainWindow(tk.Tk):
                                 moist = [raw_to_moisture(v, i) for i, v in enumerate(soil)]
                                 self.after(0, lambda d=data, m=moist: self._receive_telemetry(d, m))
                             else:
+                                if line.lower().startswith("err:") and "safety" in line.lower():
+                                    self.after(0, lambda msg=line: self._receive_safety_error(msg))
                                 logger.log(logging.ERROR if line.lower().startswith("err:") else logging.DEBUG,
                                            "Arduino message", extra={"event": "serial.device_message", "context": {"message": line[:512]}, "rate_limit": True})
                         if failed:

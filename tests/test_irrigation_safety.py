@@ -42,7 +42,7 @@ class Clock:
 
 
 @pytest.fixture
-def watering(tmp_path, monkeypatch):
+def watering(tmp_path, monkeypatch, controller_ready):
     with ExitStack() as stack:
         for name in ("Camera", "PlantAIDetector"):
             stack.enter_context(patch.object(gui, name))
@@ -59,6 +59,21 @@ def watering(tmp_path, monkeypatch):
     monkeypatch.setattr(gui.time, "monotonic", lambda: clock.now)
     monkeypatch.setattr(app, "after", clock.after)
     monkeypatch.setattr(app, "after_cancel", clock.cancel)
+    controller_ready(app)
+    app._test_controller_status = {tag: app.telemetry[tag] for tag in gui.SAFETY_TAGS}
+
+    def controller_write(payload):
+        command = payload.decode().strip()
+        status = app._test_controller_status
+        if command.startswith("safety trip ") and status["safety_locked"] == "0":
+            status.update(safety_locked="1", safety_generation=str(int(status["safety_generation"]) + 1),
+                          safety_source="2", safety_channels=command.split()[-1])
+        elif command == f"safety resolve {status['safety_generation']}" and status["safety_locked"] == "1":
+            status.update(safety_locked="0", safety_generation=str(int(status["safety_generation"]) + 1),
+                          safety_source="0", safety_channels="0")
+        return len(payload)
+
+    app.ser.write.side_effect = controller_write
     app.telemetry["moisture_pct"] = [35.8, 37.0, 100.0, 100.0]
     app._below_threshold_counts = [3, 3, 0, 0]
     yield app, clock
@@ -66,7 +81,8 @@ def watering(tmp_path, monkeypatch):
 
 
 def mask(app):
-    return app.ser.write.call_args.args[0]
+    return [call.args[0] for call in app.ser.write.call_args_list
+            if set(call.args[0].strip()) <= {ord('0'), ord('1')}][-1]
 
 
 def test_watering_logs_explain_run_and_safety_stop(watering, caplog):
@@ -218,6 +234,9 @@ def test_control_error_stops_pumps_and_camera_error_cannot_disable_safety(wateri
     app.camera.capture_array.assert_called_once()
     clock.advance(gui.MAX_WATERING_SEC)
     assert mask(app) == b"0000\n"
+    receive(app, app.telemetry["moisture_pct"])
+    app._resolve_safety()
+    receive(app, app.telemetry["moisture_pct"])
     app._below_threshold_counts = [3, 3, 0, 0]
     app._start_auto_watering()
     monkeypatch.setattr(app.soil_water_stop_setpoint, "get", MagicMock(side_effect=ValueError("invalid target")))
@@ -237,7 +256,8 @@ def test_safety_callback_stops_without_monitor_and_wall_clock_is_irrelevant(wate
 
 
 def receive(app, moist):
-    data = {**app.telemetry, "relays": "".join(str(var.get()) for var in app.water_vars)}
+    data = {**app.telemetry, **app._test_controller_status,
+            "relays": "".join(str(var.get()) for var in app.water_vars)}
     app._receive_telemetry(data, moist)
 
 
@@ -320,7 +340,7 @@ def test_new_run_requires_three_new_checks_without_cooldown(watering):
     assert mask(app) == b"1000\n"
 
 
-def test_safety_stop_requires_new_readings_before_another_run(watering):
+def test_safety_stop_blocks_new_readings_until_explicit_resolution(watering):
     app, clock = watering
     app._start_auto_watering()
     app._start_auto_ticker()
@@ -328,9 +348,138 @@ def test_safety_stop_requires_new_readings_before_another_run(watering):
     assert mask(app) == b"0000\n"
     clock.advance(10)
     assert not app._auto_watering_active
-    for _ in range(3):
+    for _ in range(12):
         check(app, clock, [30, 100, 100, 100])
+    assert mask(app) == b"0000\n"
+    assert app.safety.locked
+    app._resolve_safety()
+    receive(app, [30, 100, 100, 100])
+    assert not app.safety.locked
+    for _ in range(2):
+        check(app, clock, [30, 100, 100, 100])
+        assert mask(app) == b"0000\n"
+    check(app, clock, [30, 100, 100, 100])
     assert mask(app) == b"1000\n"
+
+
+def test_lock_blocks_manual_direct_commands_and_survives_mode_toggles(watering):
+    app, clock = watering
+    app._start_auto_watering()
+    clock.advance(gui.MAX_WATERING_SEC)
+    receive(app, [30, 30, 30, 30])
+    app.auto_var.set(0)
+    app._on_auto_toggle()
+    app.ser.write.reset_mock()
+    app.water_vars[3].set(1)
+    app._send_manual_relays(3)
+    assert not app.send_command("0001")
+    app.ser.write.assert_not_called()
+    assert all(str(button["state"]) == "disabled" for button in app.water_btns)
+    app.auto_var.set(1)
+    app._on_auto_toggle()
+    assert app.safety.locked
+    assert not app._auto_watering_active
+
+
+def test_firmware_trip_cancels_other_active_pumps_and_manual_timer(watering):
+    app, clock = watering
+    app.auto_var.set(0)
+    app.water_vars[1].set(1)
+    app._send_manual_relays(1)
+    assert app._relay_timers[1] in clock.jobs
+    app._test_controller_status.update(safety_locked="1", safety_generation="1",
+                                       safety_source="1", safety_channels="1")
+    receive(app, [30] * 4)
+    assert app.safety.locked
+    assert mask(app) == b"0000\n"
+    assert app._relay_timers == [None] * 4
+    assert not clock.jobs
+    assert app._safety_window.winfo_exists()
+    app._safety_window.destroy()
+    receive(app, [30] * 4)
+    assert app.safety.locked
+    assert "LOCKED" in app.safety_banner.cget("text")
+    app._show_safety_warning()
+    assert app._safety_window.winfo_exists()
+
+
+def test_reset_send_failure_keeps_warning_and_lock(watering):
+    app, clock = watering
+    app._start_auto_watering()
+    clock.advance(gui.MAX_WATERING_SEC)
+    receive(app, [30] * 4)
+    app.ser.write.side_effect = OSError("device lost")
+    app._resolve_safety()
+    assert app.safety.locked
+    assert "failed" in app._safety_message.get()
+
+
+def test_reopening_gui_restores_warning_and_requires_confirmed_reset(watering):
+    app, clock = watering
+    app._start_auto_watering()
+    clock.advance(gui.MAX_WATERING_SEC)
+    receive(app, [30] * 4)
+    with ExitStack() as stack:
+        for name in ("Camera", "PlantAIDetector"):
+            stack.enter_context(patch.object(gui, name))
+        for name in ("_init_serial", "_camera_loop", "_start_periodic_loggers", "_start_auto_ticker"):
+            stack.enter_context(patch.object(gui.MainWindow, name))
+        reopened = gui.MainWindow()
+    try:
+        reopened.withdraw()
+        reopened.ser = app.ser
+        assert reopened.safety.locked
+        assert reopened._safety_window.winfo_exists()
+        assert "LOCKED" in reopened.safety_banner.cget("text")
+        reopened._below_threshold_counts = [3] * 4
+        reopened._start_auto_watering()
+        assert not reopened._auto_watering_active
+        data = {**app.telemetry, **app._test_controller_status, "relays": "0000"}
+        reopened._receive_telemetry(data, [30] * 4)
+        reopened._resolve_safety()
+        assert reopened.safety.locked
+        reopened._receive_telemetry({**data, **app._test_controller_status}, [30] * 4)
+        assert not reopened.safety.locked
+        assert not reopened._auto_watering_active
+        assert reopened._below_threshold_counts == [0] * 4
+    finally:
+        reopened.destroy()
+
+
+def test_controller_rejected_reset_is_visible_and_remains_locked(watering):
+    app, clock = watering
+    app._start_auto_watering()
+    clock.advance(gui.MAX_WATERING_SEC)
+    receive(app, [30] * 4)
+    app.safety.resolve_command()
+    app._receive_safety_error("ERR: Safety reset rejected; refresh safety status")
+    assert app.safety.locked
+    assert app.safety.reset_generation is None
+    assert "rejected" in app._safety_message.get()
+
+
+def test_missing_safety_status_blocks_start_without_creating_fault(watering):
+    app, clock = watering
+    old_data = {tag: value for tag, value in app.telemetry.items() if tag not in gui.SAFETY_TAGS}
+    app._receive_telemetry(old_data, [30] * 4)
+    app._below_threshold_counts = [3] * 4
+    app._start_auto_watering()
+    assert not app._auto_watering_active
+    assert not app.safety.locked
+    assert not app.send_command("1111")
+
+
+def test_normal_sixty_second_completion_never_hides_controller_timeout(watering):
+    app, clock = watering
+    app.off_method_var.set("Time")
+    app.pump_duration_var.set(60)
+    app._start_auto_watering()
+    clock.advance(60)
+    assert not app.safety.locked  # Host's scheduled completion is normal.
+    app._test_controller_status.update(safety_locked="1", safety_generation="1",
+                                       safety_source="1", safety_channels="3")
+    receive(app, [30] * 4)
+    assert app.safety.locked  # A real firmware timeout is always a safety trip.
 
 
 def test_records_every_second_frame_and_stop_precedes_capture(watering):
@@ -428,7 +577,10 @@ int main() {
     pumps[1].request(true, 81000); // Deadline coincides with an ON command.
     assert(!pumps[1].on && pumps[1].timedOut);
     assert(!pumps[2].on && !pumps[3].on);
-    pumps[0].request(false, 90000); // Explicit OFF permits a new run.
+    pumps[0].request(false, 90000); // Ordinary OFF cannot rearm a timeout.
+    pumps[0].request(true, 90001);
+    assert(!pumps[0].on && pumps[0].timedOut);
+    pumps[0] = PumpSafety(); // Only the group safety reset rearms pumps.
     pumps[0].request(true, 90001);
     assert(pumps[0].on && !pumps[0].timedOut);
     pumps[0].check(150001);

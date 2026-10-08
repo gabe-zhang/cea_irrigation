@@ -10,7 +10,7 @@ from gui.psc_irr_gui import MainWindow, PlotWindow, SOIL_WATER_SETPOINT
 
 
 @pytest.fixture
-def headless_app():
+def headless_app(controller_ready):
     """Create a MainWindow instance in withdrawn state with hardware loops suppressed during init."""
     with patch("gui.psc_irr_gui.Camera"), patch("gui.psc_irr_gui.PlantAIDetector"):
         with patch.object(MainWindow, "_init_serial"):
@@ -19,6 +19,7 @@ def headless_app():
                     patch.object(MainWindow, "_start_auto_ticker"):
                 app = MainWindow()
     app.withdraw()
+    controller_ready(app)
     app.plant_ai.is_available = False
     app.plant_ai.last_latency_ms = 0.0
     app.plant_ai.detect_and_analyze.return_value = ([], 0.0)

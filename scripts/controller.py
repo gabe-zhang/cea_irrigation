@@ -30,8 +30,10 @@ import serial.tools.list_ports
 
 if __package__:
     from scripts.logging_config import configure_logging, install_exception_hooks
+    from scripts.safety_state import SafetyState, SAFETY_TAGS
 else:
     from logging_config import configure_logging, install_exception_hooks
+    from safety_state import SafetyState, SAFETY_TAGS
 
 logger = logging.getLogger("cea_irrigation.controller")
 
@@ -140,7 +142,7 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
                     j = i + 1
                     while j < n and len(soil_vals) < 4:
                         val_str = tokens[j]
-                        if val_str.lower() in ("soil_temp", "temp", "humi", "light", "relays", "pan", "tilt"):
+                        if val_str.lower() in ("soil_temp", "temp", "humi", "light", "relays", "pan", "tilt", *SAFETY_TAGS):
                             break
                         soil_vals.append(_safe_int(val_str))
                         j += 1
@@ -169,6 +171,9 @@ def parse_telemetry_line(raw_line: str) -> dict | None:
                     i += 2
                 elif tag == "tilt" and i + 1 < n:
                     data["tilt"] = _safe_int(tokens[i + 1])
+                    i += 2
+                elif tag in SAFETY_TAGS and i + 1 < n:
+                    data[tag] = tokens[i + 1]
                     i += 2
                 else:
                     i += 1
@@ -231,6 +236,7 @@ def format_telemetry_compact(data: dict) -> str:
         f"[{now}] Soil: {soil_repr:<19} | SoilTemp: {soil_temp_str:<6} | "
         f"Air: {air_temp_str:<6} {air_humi_str:<6} | Light: {light_str:<3} | "
         f"Relays: {relays_str:<4} | Pan: {pan_str:<4} | Tilt: {tilt_str:<3}"
+        + (" | ALL PUMPS LOCKED" if str(data.get("safety_locked")) == "1" else "")
     )
 
 
@@ -249,10 +255,14 @@ def read_fresh_telemetry(ser: serial.Serial, timeout_sec: float = 3.0) -> dict |
     return None
 
 
-def send_command(ser: serial.Serial, cmd: str) -> bool:
+def send_command(ser: serial.Serial, cmd: str, safety: SafetyState | None = None) -> bool:
     """Send a command line to Arduino and flush write buffer."""
     command = cmd.strip()
     is_bitmask = bool(command) and all(c in "01" for c in command)
+    if is_bitmask and "1" in command and safety is not None and not safety.can_water:
+        logger.warning("Pump ON command blocked by safety state", extra={"event": "safety.command_blocked", "context": {"command": command}})
+        print("[Safety] Watering blocked: locked or waiting for controller safety status.")
+        return False
     try:
         ser.write((cmd.strip() + "\n").encode("utf-8"))
         ser.flush()
@@ -299,9 +309,30 @@ def main():
 
     logger.info("Serial connection opened", extra={"event": "serial.connected", "context": {"port": port, "baud": args.baud}})
 
+    safety = SafetyState()
+    serial_write_lock = threading.Lock()
+
+    def write(command):
+        with serial_write_lock:
+            return send_command(ser, command, safety)
+
+    def sync_safety(data):
+        action = safety.observe(data)
+        if action == "trip":
+            write("0000")
+            write(safety.trip_command())
+        elif safety.locked and data.get("relays") != "0000":
+            write("0000")
+        if action == "resolved":
+            print("[Safety] Resolution confirmed. All pumps are OFF; watering is available.")
+
+    write("0000")
+    write("safety status")
+
     print("Fetching initial telemetry...")
     initial_data = read_fresh_telemetry(ser, timeout_sec=4.0)
     if initial_data:
+        sync_safety(initial_data)
         print(f"--> Connected! Initial Reading:\n    {format_telemetry_compact(initial_data)}")
     else:
         logger.warning("Initial telemetry timed out", extra={"event": "telemetry.initial_timeout", "context": {"timeout_sec": 4}})
@@ -314,6 +345,8 @@ def main():
     print("  * Pan Control:    'p <0-130>'    (e.g. 'p 55', 'p 0', 'p 130')")
     print("  * Tilt Control:   't <0-60>'     (e.g. 't 30', 't 45', 't 60')")
     print("  * Home:           'h' / 'c'      (Resets Pan 55, Tilt 30)")
+    print("  * Safety status:  'safety status'")
+    print("  * Issue resolved: 'safety resolve' (Clears lock after controller confirmation)")
     print("  * Exit:           'exit' / 'q'   (Turns off relays, homes servos, exits)")
     print("=" * 68 + "\n")
 
@@ -329,6 +362,7 @@ def main():
                         line_str = line_bytes.decode("utf-8", errors="replace").strip()
                         data = parse_telemetry_line(line_str)
                         if data is not None:
+                            sync_safety(data)
                             if data.get("relays") != previous_relays:
                                 logger.info("Device reported relay state", extra={"event": "serial.relay_state", "context": {
                                     "previous": previous_relays, "relays": data.get("relays"),
@@ -337,6 +371,8 @@ def main():
                             logger.debug("Telemetry received", extra={"event": "telemetry.received", "context": data})
                             print(f"\n{format_telemetry_compact(data)}\n> ", end="", flush=True)
                         elif line_str:
+                            if line_str.lower().startswith("err:") and "safety" in line_str.lower():
+                                safety.reset_failed(line_str)
                             logger.log(logging.ERROR if line_str.lower().startswith("err:") else logging.DEBUG,
                                        "Arduino message", extra={"event": "serial.device_message", "context": {"message": line_str[:512]}})
                             # Print ACKs, headers, and status messages cleanly
@@ -359,18 +395,31 @@ def main():
 
             cmd_lower = cmd.lower()
 
+            if cmd_lower == "safety status":
+                write("safety status")
+                continue
+            if cmd_lower == "safety resolve":
+                command = safety.resolve_command()
+                if command is None:
+                    print("[Safety] Reset unavailable: wait for current locked controller status.")
+                else:
+                    write("0000")
+                    if write(command):
+                        print("[Safety] Reset requested; waiting for controller confirmation.")
+                continue
+
             # Exit command
             if cmd_lower in ("exit", "quit", "q"):
                 print("Turning off relays and homing servos before exit...")
-                send_command(ser, "0000")
+                write("0000")
                 time.sleep(0.1)
-                send_command(ser, "h")
+                write("h")
                 time.sleep(0.3)
                 break
 
             # Home command ('h' or legacy 'c')
             if cmd_lower in ("h", "c"):
-                send_command(ser, "h")
+                write("h")
                 continue
 
             # Pan command ('p <angle>' or 'P <angle>')
@@ -381,7 +430,7 @@ def main():
                     if angle < PAN_MIN or angle > PAN_MAX:
                         print(f"[Warning] Pan angle {angle}° clamped to safety bounds [{PAN_MIN}, {PAN_MAX}].")
                         angle = max(PAN_MIN, min(PAN_MAX, angle))
-                    send_command(ser, f"p {angle}")
+                    write(f"p {angle}")
                     continue
                 else:
                     print("[Error] Invalid pan command. Use 'p <0-130>' (e.g. 'p 65').")
@@ -395,7 +444,7 @@ def main():
                     if angle < TILT_MIN or angle > TILT_MAX:
                         print(f"[Warning] Tilt angle {angle}° clamped to safety bounds [{TILT_MIN}, {TILT_MAX}].")
                         angle = max(TILT_MIN, min(TILT_MAX, angle))
-                    send_command(ser, f"t {angle}")
+                    write(f"t {angle}")
                     continue
                 else:
                     print("[Error] Invalid tilt command. Use 't <0-60>' (e.g. 't 30').")
@@ -403,18 +452,18 @@ def main():
 
             # Bitmask command: 1 to 4 digits of '0' and '1'
             if 1 <= len(cmd) <= 4 and all(c in "01" for c in cmd):
-                send_command(ser, cmd)
+                write(cmd)
                 continue
 
             print(f"[Warning] Unknown input '{cmd}'.")
-            print("  Allowed: 'p <0-130>', 't <0-60>', 'h', 'c', bitmask (e.g. '0000'), or 'exit'.")
+            print("  Allowed: 'p <0-130>', 't <0-60>', 'h', 'c', bitmask (e.g. '0000'), 'safety status', 'safety resolve', or 'exit'.")
 
     except (KeyboardInterrupt, EOFError):
         print("\nInterrupted. Turning off relays and homing servos...")
         try:
-            send_command(ser, "0000")
+            write("0000")
             time.sleep(0.1)
-            send_command(ser, "h")
+            write("h")
             time.sleep(0.2)
         except Exception:
             logger.exception("Shutdown commands failed", extra={"event": "shutdown.command_failed"})

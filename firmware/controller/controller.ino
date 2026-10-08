@@ -9,6 +9,8 @@
 #include <Wire.h>
 #include <DFRobot_VEML7700.h>
 #include "PumpSafety.h"
+#include "SafetyStorage.h"
+#include <EEPROM.h>
 
 #define BAUDRATE 9600
 
@@ -69,19 +71,28 @@ void checkServoDetach() {
 
 // ── Relay State ──────────────────────────────────────────────────────
 char relayStates[NUM_RELAYS + 1] = "0000";
-PumpSafety pumpSafety[NUM_RELAYS];
+PumpGroupSafety pumpGroup;
+SafetyStorage<EEPROMClass> safetyStorage(EEPROM);
 
 void updateRelay(int idx) {
-  digitalWrite(RELAY_PINS[idx], pumpSafety[idx].on ? RELAY_ON : RELAY_OFF);
-  relayStates[idx] = pumpSafety[idx].on ? '1' : '0';
+  digitalWrite(RELAY_PINS[idx], pumpGroup.pumps[idx].on ? RELAY_ON : RELAY_OFF);
+  relayStates[idx] = pumpGroup.pumps[idx].on ? '1' : '0';
+}
+
+bool persistSafety() {
+  if (safetyStorage.save(pumpGroup.record)) return true;
+  pumpGroup.trip(3, 0);
+  for (int i = 0; i < NUM_RELAYS; ++i) updateRelay(i);
+  Serial.println(F("ERR: Safety storage failed; all pumps locked"));
+  return false;
 }
 
 void checkPumpSafety() {
-  uint32_t now = millis();
-  for (int i = 0; i < NUM_RELAYS; i++) {
-    pumpSafety[i].check(now);
-    updateRelay(i);
-  }
+  uint32_t before = pumpGroup.record.generation;
+  pumpGroup.check(millis());
+  for (int i = 0; i < NUM_RELAYS; i++) updateRelay(i);
+  // Physical outputs are OFF before any potentially slow EEPROM writes.
+  if (pumpGroup.record.generation != before) persistSafety();
 }
 
 // ── DHT22 ────────────────────────────────────────────────────────────
@@ -261,16 +272,31 @@ void broadcastTelemetry() {
   Serial.print(",pan,");
   Serial.print(servos[PAN].current);
   Serial.print(",tilt,");
-  Serial.println(servos[TILT].current);
+  Serial.print(servos[TILT].current);
+  Serial.print(F(",safety_version,1,safety_locked,"));
+  Serial.print(pumpGroup.record.locked ? 1 : 0);
+  Serial.print(F(",safety_generation,"));
+  Serial.print(pumpGroup.record.generation);
+  Serial.print(F(",safety_source,"));
+  Serial.print(pumpGroup.record.source);
+  Serial.print(F(",safety_channels,"));
+  Serial.println(pumpGroup.record.channels);
 }
 
 // ── Commands ─────────────────────────────────────────────────────────
 
 void applyBitmask(const String& mask) {
-  for (unsigned int i = 0; i < mask.length() && i < NUM_RELAYS; i++) {
-    pumpSafety[i].request(mask[i] == '1', millis());
-    updateRelay(i);
+  checkPumpSafety();
+  uint32_t before = pumpGroup.record.generation;
+  if (pumpGroup.record.locked && mask.indexOf('1') >= 0) {
+    Serial.println(F("ERR: All pumps locked; inspect the issue and use safety resolve <generation>"));
+    return;
   }
+  for (unsigned int i = 0; i < mask.length() && i < NUM_RELAYS; i++) {
+    pumpGroup.request(i, mask[i] == '1', millis());
+  }
+  for (int i = 0; i < NUM_RELAYS; ++i) updateRelay(i);
+  if (before != pumpGroup.record.generation) persistSafety();
   Serial.print("ACK: Relays set to ");
   Serial.println(relayStates);
 }
@@ -296,6 +322,37 @@ void handleSerialCommands() {
   if (cmd.length() == 0) return;
 
   char firstChar = cmd.charAt(0);
+
+  if (cmd == "safety status") { broadcastTelemetry(); return; }
+  if (cmd.startsWith("safety trip ")) {
+    String value = cmd.substring(12);
+    if (value.length() == 0 || value.length() > 2) { Serial.println(F("ERR: Invalid safety channel mask")); return; }
+    for (unsigned int i = 0; i < value.length(); ++i)
+      if (value[i] < '0' || value[i] > '9') { Serial.println(F("ERR: Invalid safety channel mask")); return; }
+    int channels = value.toInt();
+    if (channels > 15) { Serial.println(F("ERR: Invalid safety channel mask")); return; }
+    uint32_t before = pumpGroup.record.generation;
+    pumpGroup.trip(2, uint8_t(channels));
+    for (int i = 0; i < NUM_RELAYS; ++i) updateRelay(i);
+    if (before != pumpGroup.record.generation) persistSafety();
+    broadcastTelemetry();
+    return;
+  }
+  if (cmd.startsWith("safety resolve ")) {
+    String value = cmd.substring(15);
+    if (value.length() == 0 || value.length() > 10) { Serial.println(F("ERR: Invalid safety generation")); return; }
+    for (unsigned int i = 0; i < value.length(); ++i)
+      if (value[i] < '0' || value[i] > '9') { Serial.println(F("ERR: Invalid safety generation")); return; }
+    // Compare decimal text too, so overflow cannot turn a stale value into a match.
+    uint32_t generation = strtoul(value.c_str(), NULL, 10);
+    if (String(generation) != value || !pumpGroup.resolve(generation)) {
+      Serial.println(F("ERR: Safety reset rejected; refresh safety status"));
+    } else if (persistSafety()) {
+      Serial.println(F("ACK: Safety resolved; all pumps remain OFF"));
+    }
+    broadcastTelemetry();
+    return;
+  }
 
   // Home servos (supports 'h' or legacy 'c')
   if (cmd.equalsIgnoreCase("h") || cmd.equalsIgnoreCase("c")) {
@@ -353,10 +410,12 @@ void setup() {
   }
   relayStates[NUM_RELAYS] = '\0';
 
+  pumpGroup.record = safetyStorage.load();
+
   moveServo(PAN,  servos[PAN].homeAngle);
   moveServo(TILT, servos[TILT].homeAngle);
 
-  Serial.println("FORMAT: soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,val,relays,mask,pan,val,tilt,val");
+  Serial.println(F("FORMAT: soil,s1,s2,s3,s4,soil_temp,val,temp,val,humi,val,light,val,relays,mask,pan,val,tilt,val,safety_version,val,safety_locked,val,safety_generation,val,safety_source,val,safety_channels,val"));
 
   delay(500);
   Wire.begin();

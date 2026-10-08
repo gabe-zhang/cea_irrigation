@@ -187,7 +187,7 @@ def test_read_historical_telemetry_corrupt_and_edge_cases(tmp_path):
 # --- 3. Dynamic Setpoint & Auto-Loop Reaction ---
 
 @pytest.fixture
-def headless_gui(tmp_path, monkeypatch):
+def headless_gui(tmp_path, monkeypatch, controller_ready):
     """Create headless MainWindow instance with background loops mocked."""
     with patch("gui.psc_irr_gui.Camera"), patch("gui.psc_irr_gui.PlantAIDetector"):
         with patch.object(MainWindow, "_init_serial"):
@@ -196,6 +196,7 @@ def headless_gui(tmp_path, monkeypatch):
                     with patch.object(MainWindow, "_start_auto_ticker"):
                         app = MainWindow()
     app.withdraw()
+    controller_ready(app)
     monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
     yield app
     try:
@@ -347,6 +348,7 @@ def test_auto_watering_selective_channels_and_target_cutoff(headless_gui, tmp_pa
         assert app._auto_channels_active == []
         assert [v.get() for v in app.water_vars] == [0, 0, 0, 0]
         app.ser.write.assert_called_with(b"0000\n")
+        assert not app.safety.locked
 
 
 def test_auto_watering_safety_timeout(headless_gui, tmp_path, monkeypatch):
@@ -376,7 +378,9 @@ def test_auto_watering_safety_timeout(headless_gui, tmp_path, monkeypatch):
         assert app._auto_watering_active is False
         assert app._auto_channels_active == []
         assert [v.get() for v in app.water_vars] == [0, 0, 0, 0]
-        app.ser.write.assert_called_with(b"0000\n")
+        app.ser.write.assert_any_call(b"0000\n")
+        app.ser.write.assert_called_with(b"safety trip 1\n")
+        assert app.safety.locked
 
 
 # --- 6. PlotWindow Dynamic Range Switching Tests ---
