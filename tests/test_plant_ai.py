@@ -69,7 +69,8 @@ def test_analyze_crop_health_healthy():
 def test_analyze_crop_health_chlorosis():
     """Verify that a yellowing/chlorotic crop patch is classified as YELLOWING WARNING."""
     crop = np.zeros((100, 100, 3), dtype=np.uint8)
-    crop[:, :] = (30, 210, 220)
+    # BGR -> HSV (30, 227, 180), within the yellow foliage hue and S/V limits.
+    crop[:, :] = (20, 180, 180)
 
     status, h_pct, c_pct, mean_hue, color, _ = analyze_crop_health(crop)
     assert status == "YELLOWING WARNING"

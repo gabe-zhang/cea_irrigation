@@ -399,8 +399,30 @@ def test_firmware_trip_cancels_other_active_pumps_and_manual_timer(watering):
     receive(app, [30] * 4)
     assert app.safety.locked
     assert "LOCKED" in app.safety_banner.cget("text")
+    assert app.safety_resume_button.winfo_manager() == "pack"
+    assert str(app.safety_resume_button.cget("state")) == "normal"
     app._show_safety_warning()
     assert app._safety_window.winfo_exists()
+
+
+def test_sidebar_resolution_waits_for_confirmation_then_hides_warning(watering):
+    app, clock = watering
+    app._test_controller_status.update(safety_locked="1", safety_generation="1",
+                                       safety_source="1", safety_channels="1")
+    receive(app, [30] * 4)
+    app._safety_window.destroy()
+    app.ser.reset_mock()
+    app.safety_resume_button.invoke()
+    assert app.safety.locked
+    assert mask(app) == b"0000\n"
+    assert app.ser.write.call_args_list[-1].args[0] == b"safety resolve 1\n"
+    assert str(app.safety_resume_button.cget("state")) == "disabled"
+    assert "waiting for confirmation" in app.safety_banner.cget("text")
+    receive(app, [30] * 4)
+    assert not app.safety.locked
+    assert app.safety_panel.winfo_manager() == ""
+    assert not app._auto_watering_active
+    assert app._below_threshold_counts == [0] * 4
 
 
 def test_reset_send_failure_keeps_warning_and_lock(watering):
@@ -431,11 +453,13 @@ def test_reopening_gui_restores_warning_and_requires_confirmed_reset(watering):
         assert reopened.safety.locked
         assert reopened._safety_window.winfo_exists()
         assert "LOCKED" in reopened.safety_banner.cget("text")
+        assert str(reopened.safety_resume_button.cget("state")) == "disabled"
         reopened._below_threshold_counts = [3] * 4
         reopened._start_auto_watering()
         assert not reopened._auto_watering_active
         data = {**app.telemetry, **app._test_controller_status, "relays": "0000"}
         reopened._receive_telemetry(data, [30] * 4)
+        assert str(reopened.safety_resume_button.cget("state")) == "normal"
         reopened._resolve_safety()
         assert reopened.safety.locked
         reopened._receive_telemetry({**data, **app._test_controller_status}, [30] * 4)
@@ -467,6 +491,13 @@ def test_missing_safety_status_blocks_start_without_creating_fault(watering):
     assert not app._auto_watering_active
     assert not app.safety.locked
     assert not app.send_command("1111")
+    assert app.safety_panel.winfo_manager() == "pack"
+    assert app.safety_resume_button.winfo_manager() == "pack"
+    assert str(app.safety_resume_button.cget("state")) == "disabled"
+    assert "Update the Arduino firmware" in app.safety_banner.cget("text")
+    receive(app, [30] * 4)
+    assert app.safety.can_water
+    assert app.safety_panel.winfo_manager() == ""
 
 
 def test_normal_sixty_second_completion_never_hides_controller_timeout(watering):

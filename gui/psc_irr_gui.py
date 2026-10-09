@@ -1006,6 +1006,7 @@ class MainWindow(tk.Tk):
         self._safety_window = None
         self._safety_warning_shown = False
         self._safety_error = None
+        self._safety_status_issue = None
         self.current_pan, self.current_tilt = PAN_HOME, TILT_HOME
         self._repeat_job: str | None = None
         self._data_logger_job: str | None = None
@@ -1123,11 +1124,16 @@ class MainWindow(tk.Tk):
         self._start_auto_ticker()
 
     def _build_safety_warning(self) -> None:
-        self.safety_banner = tk.Label(self.sidebar_content, wraplength=self.margin_w - 40,
+        self.safety_panel = tk.Frame(self.sidebar_content, bg="#fff3cd")
+        self.safety_panel.pack(fill=tk.X, padx=10, pady=5, before=self.sidebar_content.winfo_children()[0])
+        self.safety_banner = tk.Label(self.safety_panel, wraplength=self.margin_w - 40,
                                       bg="#fff3cd", fg="#842029", font=("arial", 14, "bold"),
                                       justify=tk.LEFT, padx=8, pady=8)
-        self.safety_banner.pack(fill=tk.X, padx=10, pady=5, before=self.sidebar_content.winfo_children()[0])
+        self.safety_banner.pack(fill=tk.X)
         self.safety_banner.bind("<Button-1>", lambda _event: self._show_safety_warning())
+        self.safety_resume_button = tk.Button(self.safety_panel, text="Resolved — resume watering",
+                                             command=self._resolve_safety, state=tk.DISABLED)
+        self.safety_resume_button.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._refresh_safety_ui()
 
     def _refresh_safety_ui(self) -> None:
@@ -1145,7 +1151,7 @@ class MainWindow(tk.Tk):
                 reason = "Saved controller safety state needs recovery"
             text = f"ALL PUMPS LOCKED{detail}\n{reason}\n"
             text += f"Triggered: {context.get('timestamp', 'unknown time')}\n"
-            text += "Check water, tubing, pump and sensor. Click for Resolved."
+            text += "Check water, tubing, pump and sensor, then click Resolved below."
             if not self.safety.online:
                 text += "\nWaiting for current controller status before reset."
             if self._safety_error:
@@ -1156,20 +1162,26 @@ class MainWindow(tk.Tk):
             text = "Watering paused: waiting for current safety status from the controller."
         else:
             text = ""
+        if text and self._safety_status_issue:
+            text += "\n" + self._safety_status_issue
+        if text and self.safety.reset_generation is not None:
+            text += "\nReset requested; waiting for confirmation."
         self.safety_banner.configure(text=text)
         if text:
-            self.safety_banner.pack(fill=tk.X, padx=10, pady=5, before=self.sidebar_content.winfo_children()[0])
+            self.safety_panel.pack(fill=tk.X, padx=10, pady=5, before=self.sidebar_content.winfo_children()[0])
         else:
-            self.safety_banner.pack_forget()
+            self.safety_panel.pack_forget()
+        can_resolve = (self.safety.online and self.safety.locked
+                       and not self.safety.state["pending_trip"]
+                       and self.safety.reset_generation is None)
+        self.safety_resume_button.configure(state=tk.NORMAL if can_resolve else tk.DISABLED)
         for button in self.water_btns:
             button.configure(state=tk.NORMAL if self.safety.can_water and not self.auto_var.get() else tk.DISABLED)
         if self.safety.locked and not self._safety_warning_shown:
             self._show_safety_warning()
         if self._safety_window and self._safety_window.winfo_exists():
-            self._safety_message.set(text + ("\nReset requested; waiting for confirmation."
-                                           if self.safety.reset_generation is not None else ""))
-            self._safety_resolve_button.configure(state=tk.NORMAL if self.safety.online and self.safety.locked
-                and not self.safety.state["pending_trip"] else tk.DISABLED)
+            self._safety_message.set(text)
+            self._safety_resolve_button.configure(state=tk.NORMAL if can_resolve else tk.DISABLED)
             if not self.safety.locked and not self.safety.storage_error:
                 self._safety_window.destroy()
                 self._safety_window = None
@@ -1189,7 +1201,7 @@ class MainWindow(tk.Tk):
         tk.Label(self._safety_window, textvariable=self._safety_message, wraplength=440,
                  justify=tk.LEFT, font=("arial", 14), padx=18, pady=18).pack()
         self._safety_resolve_button = tk.Button(self._safety_window, text="Resolved — resume watering",
-            command=self._resolve_safety, state=tk.NORMAL if self.safety.online and not self.safety.state["pending_trip"] else tk.DISABLED)
+            command=self._resolve_safety, state=self.safety_resume_button.cget("state"))
         self._safety_resolve_button.pack(padx=18, pady=(0, 18))
 
     def _inhibit_watering(self) -> None:
@@ -1221,6 +1233,16 @@ class MainWindow(tk.Tk):
     def _sync_safety(self, data: dict) -> None:
         was_locked = self.safety.locked
         action = self.safety.observe(data)
+        if action == "invalid":
+            self._safety_status_issue = (
+                "Controller telemetry has no safety status. Update the Arduino firmware, then reopen the app."
+                if any(tag not in data for tag in SAFETY_TAGS) else
+                "Controller safety status is invalid or unsupported. Check the Arduino firmware version."
+            )
+        elif action == "stale":
+            self._safety_status_issue = "Controller safety status is out of date. Waiting for current status."
+        else:
+            self._safety_status_issue = None
         if (self.safety.locked and not was_locked or not self.safety.can_water
                 and (self._auto_watering_active or any(v.get() for v in self.water_vars))):
             self._inhibit_watering()
