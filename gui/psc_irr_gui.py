@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import signal
@@ -34,7 +35,8 @@ from tkinter import filedialog, ttk
 # Preserve the supported direct-script launch alongside python -m gui.psc_irr_gui.
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.logging_config import configure_logging, install_exception_hooks
+from scripts.logging_config import configure_logging, install_exception_hooks, DEFAULT_LOG_DIR
+from scripts.gui_watchdog import GuiWatchdog
 from scripts.safety_state import SafetyState, SAFETY_TAGS
 
 logger = logging.getLogger("cea_irrigation.gui")
@@ -811,17 +813,20 @@ class PlotWindow:
         # X-axis range and formatter
         ax_moist.set_xlim(first, last)
         if mode == "day" or (mode == "period" and start_date == end_date):
-            ax_moist.xaxis.set_major_locator(mdates.HourLocator(interval=4))
+            ax_moist.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 4)))
             ax_moist.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
             xlabel = "Time"
         else:
             span_days = (end_date - start_date).days + 1 if mode == "period" else (7 if mode == "week" else 30)
             tick_interval = max(1, (span_days + 6) // 7)
-            # Anchor labels to the actual start, including rolling time-of-day.
-            # DayLocator uses midnight ticks and can skip the title's first date.
+            # Date labels always mark midnight, including rolling ranges.
+            # Start at the first midnight inside the range to preserve its limits.
+            first_tick = datetime.combine(first.date(), datetime.min.time())
+            if first_tick < first:
+                first_tick += timedelta(days=1)
             ax_moist.set_xticks([
-                first + timedelta(days=offset)
-                for offset in range(0, (last - first).days + 1, tick_interval)
+                first_tick + timedelta(days=offset)
+                for offset in range(0, (last - first_tick).days + 1, tick_interval)
             ])
             ax_moist.xaxis.set_major_formatter(mdates.DateFormatter(VISIBLE_DATE_FORMAT))
             xlabel = "Date"
@@ -850,13 +855,14 @@ class PlotWindow:
             self.ydata_light.clear()
 
             self._init_live_figure()
-            if self.canvas_widget:
-                self.canvas_widget.draw_idle()
             if self.ani and self.ani.event_source:
                 self.ani.event_source.stop()
             self.ani = animation.FuncAnimation(
                 self.fig, self._update, self._gen, interval=500, cache_frame_data=False
             )
+            if self.canvas_widget:
+                # Start the animation before a close or range change can discard it.
+                self.canvas_widget.draw()
             if self.window:
                 self.window.title("Environmental Telemetry & Soil Moisture (Last 60s)")
         else:
@@ -2456,12 +2462,17 @@ class MainWindow(tk.Tk):
 
 
 if __name__ == "__main__":
-    configure_logging("gui")
+    log_path = configure_logging("gui")
     install_exception_hooks()
     app = MainWindow()
+    watchdog_dir = log_path.parent if log_path else Path(os.environ.get("CEA_LOG_DIR", DEFAULT_LOG_DIR)).expanduser()
+    watchdog = GuiWatchdog(app, watchdog_dir)
+    watchdog.start()
     signal.signal(signal.SIGINT, lambda sig, frame: app.on_closing())
     signal.signal(signal.SIGTERM, lambda sig, frame: app.on_closing())
     try:
         app.mainloop()
     except KeyboardInterrupt:
         app.on_closing()
+    finally:
+        watchdog.stop()

@@ -15,6 +15,8 @@ img_bbox.jpg
 img_mask.jpg
 
 # Development files
+dev/
+walkthrough/
 note.md
 TODOs.md
 assets/

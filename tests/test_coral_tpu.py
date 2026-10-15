@@ -15,32 +15,18 @@ if str(BASE_DIR) not in sys.path:
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "gui" / "models" / "yolo26n_exp2.tflite"
 
-_SHARED_DELEGATE = None
-
-
-def get_shared_delegate():
-    """Obtain or reuse the singleton Edge TPU delegate to avoid driver reinitialization."""
-    global _SHARED_DELEGATE
-    if _SHARED_DELEGATE is None:
-        import ai_edge_litert.interpreter as tflite
-        _SHARED_DELEGATE = tflite.load_delegate("libedgetpu.so.1")
-    return _SHARED_DELEGATE
-
-
-def test_edgetpu_delegate_load():
+def test_edgetpu_delegate_load(coral_delegate):
     """Test that LiteRT can locate and load the libedgetpu C delegate library."""
-    delegate = get_shared_delegate()
-    assert delegate is not None, "Failed to load Edge TPU delegate (libedgetpu.so.1)"
+    assert coral_delegate is not None, "Failed to load Edge TPU delegate (libedgetpu.so.1)"
 
 
-def test_edgetpu_model_initialization():
+def test_edgetpu_model_initialization(coral_delegate):
     """Test loading an Edge TPU quantized TFLite model and allocating tensors."""
     import ai_edge_litert.interpreter as tflite
 
     assert MODEL_PATH.is_file(), f"Model file not found at {MODEL_PATH}"
 
-    delegate = get_shared_delegate()
-    interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[delegate])
+    interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[coral_delegate])
     interpreter.allocate_tensors()
 
     input_details = interpreter.get_input_details()
@@ -51,12 +37,11 @@ def test_edgetpu_model_initialization():
     assert len(output_details) >= 1
 
 
-def test_edgetpu_inference_execution():
+def test_edgetpu_inference_execution(coral_delegate):
     """Test running end-to-end inference on the Edge TPU and verify execution speed."""
     import ai_edge_litert.interpreter as tflite
 
-    delegate = get_shared_delegate()
-    interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[delegate])
+    interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[coral_delegate])
     interpreter.allocate_tensors()
 
     input_details = interpreter.get_input_details()
@@ -91,15 +76,14 @@ def test_edgetpu_inference_execution():
     print(f"\n[PASS] Edge TPU inference: {avg_ms:.2f} ms ({fps:.1f} FPS)")
 
 
-def test_picamera2_and_litert_coexistence():
+def test_picamera2_and_litert_coexistence(coral_delegate):
     """Verify that Picamera2 (system package) and LiteRT Edge TPU work simultaneously in Python 3.13."""
     import picamera2
     import ai_edge_litert.interpreter as tflite
 
     assert hasattr(picamera2, "Picamera2")
 
-    delegate = get_shared_delegate()
-    interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[delegate])
+    interpreter = tflite.Interpreter(model_path=str(MODEL_PATH), experimental_delegates=[coral_delegate])
     interpreter.allocate_tensors()
 
     assert interpreter is not None

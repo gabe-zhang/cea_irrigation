@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -13,8 +13,10 @@ import sys
 import threading
 import time
 import uuid
+from zoneinfo import ZoneInfo
 
 LOGGER_NAME = "cea_irrigation"
+LOG_TIMEZONE = ZoneInfo("America/Chicago")
 DEFAULT_LOG_DIR = Path(__file__).resolve().parent.parent / "Data" / "logs"
 MAX_BYTES = 5 * 1024 * 1024
 BACKUP_COUNT = 5
@@ -61,7 +63,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
-            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.fromtimestamp(record.created, LOG_TIMEZONE).isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "logger": record.name,
             "event": getattr(record, "event", "message"),
@@ -114,10 +116,11 @@ class EventFilter(logging.Filter):
 
 
 class ConsoleFormatter(logging.Formatter):
-    converter = time.gmtime
-
     def __init__(self):
-        super().__init__("%(asctime)s UTC %(levelname)s %(name)s [%(event)s] %(message)s", "%H:%M:%S")
+        super().__init__("%(asctime)s %(levelname)s %(name)s [%(event)s] %(message)s", "%H:%M:%S %Z")
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        return datetime.fromtimestamp(record.created, LOG_TIMEZONE).strftime(datefmt or "%H:%M:%S %Z")
 
     def format(self, record: logging.LogRecord) -> str:
         if not hasattr(record, "event"):

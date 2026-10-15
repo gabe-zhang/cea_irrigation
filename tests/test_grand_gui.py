@@ -186,27 +186,6 @@ def test_read_historical_telemetry_corrupt_and_edge_cases(tmp_path):
 
 # --- 3. Dynamic Setpoint & Auto-Loop Reaction ---
 
-@pytest.fixture
-def headless_gui(tmp_path, monkeypatch, controller_ready):
-    """Create headless MainWindow instance with background loops mocked."""
-    with patch("gui.psc_irr_gui.Camera"), patch("gui.psc_irr_gui.PlantAIDetector"):
-        with patch.object(MainWindow, "_init_serial"):
-            with patch.object(MainWindow, "_camera_loop"):
-                with patch.object(MainWindow, "_start_periodic_loggers"):
-                    with patch.object(MainWindow, "_start_auto_ticker"):
-                        app = MainWindow()
-    app.withdraw()
-    controller_ready(app)
-    monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)
-    yield app
-    try:
-        app.destroy()
-    except Exception:
-        pass
-
-
-# --- 4. Periodic Data & Image Loggers ---
-
 def test_periodic_data_logger(headless_gui, tmp_path, monkeypatch):
     app = headless_gui
     monkeypatch.setattr(psc_mod, "TELEMETRY_DIR", tmp_path)

@@ -1,6 +1,5 @@
 """Exercise complete watering runs with deterministic time and no live hardware."""
 
-from contextlib import ExitStack
 import csv
 import logging
 from pathlib import Path
@@ -11,73 +10,6 @@ import numpy as np
 import pytest
 
 import gui.psc_irr_gui as gui
-
-
-class Clock:
-    def __init__(self):
-        self.now = 0.0
-        self.jobs = {}
-        self.sequence = 0
-
-    def after(self, delay_ms, callback):
-        self.sequence += 1
-        job = f"test-job-{self.sequence}"
-        self.jobs[job] = (self.now + delay_ms / 1000, callback)
-        return job
-
-    def cancel(self, job):
-        self.jobs.pop(job, None)
-
-    def advance(self, seconds):
-        target = self.now + seconds
-        while self.jobs:
-            job = min(self.jobs, key=lambda key: self.jobs[key][0])
-            deadline, callback = self.jobs[job]
-            if deadline > target:
-                break
-            self.now = deadline
-            del self.jobs[job]
-            callback()
-        self.now = target
-
-
-@pytest.fixture
-def watering(tmp_path, monkeypatch, controller_ready):
-    with ExitStack() as stack:
-        for name in ("Camera", "PlantAIDetector"):
-            stack.enter_context(patch.object(gui, name))
-        for name in ("_init_serial", "_camera_loop", "_start_periodic_loggers", "_start_auto_ticker"):
-            stack.enter_context(patch.object(gui.MainWindow, name))
-        app = gui.MainWindow()
-    app.withdraw()
-    app.camera.is_available = False
-    app.ser = MagicMock()
-    app.ser.is_open = True
-    clock = Clock()
-    monkeypatch.setattr(gui, "AUTO_WATERING_DIR", tmp_path / "images")
-    monkeypatch.setattr(gui, "TELEMETRY_DIR", tmp_path)
-    monkeypatch.setattr(gui.time, "monotonic", lambda: clock.now)
-    monkeypatch.setattr(app, "after", clock.after)
-    monkeypatch.setattr(app, "after_cancel", clock.cancel)
-    controller_ready(app)
-    app._test_controller_status = {tag: app.telemetry[tag] for tag in gui.SAFETY_TAGS}
-
-    def controller_write(payload):
-        command = payload.decode().strip()
-        status = app._test_controller_status
-        if command.startswith("safety trip ") and status["safety_locked"] == "0":
-            status.update(safety_locked="1", safety_generation=str(int(status["safety_generation"]) + 1),
-                          safety_source="2", safety_channels=command.split()[-1])
-        elif command == f"safety resolve {status['safety_generation']}" and status["safety_locked"] == "1":
-            status.update(safety_locked="0", safety_generation=str(int(status["safety_generation"]) + 1),
-                          safety_source="0", safety_channels="0")
-        return len(payload)
-
-    app.ser.write.side_effect = controller_write
-    app.telemetry["moisture_pct"] = [35.8, 37.0, 100.0, 100.0]
-    app._below_threshold_counts = [3, 3, 0, 0]
-    yield app, clock
-    app.destroy()
 
 
 def mask(app):
@@ -436,39 +368,30 @@ def test_reset_send_failure_keeps_warning_and_lock(watering):
     assert "failed" in app._safety_message.get()
 
 
-def test_reopening_gui_restores_warning_and_requires_confirmed_reset(watering):
+def test_reopening_gui_restores_warning_and_requires_confirmed_reset(watering, gui_app_factory):
     app, clock = watering
     app._start_auto_watering()
     clock.advance(gui.MAX_WATERING_SEC)
     receive(app, [30] * 4)
-    with ExitStack() as stack:
-        for name in ("Camera", "PlantAIDetector"):
-            stack.enter_context(patch.object(gui, name))
-        for name in ("_init_serial", "_camera_loop", "_start_periodic_loggers", "_start_auto_ticker"):
-            stack.enter_context(patch.object(gui.MainWindow, name))
-        reopened = gui.MainWindow()
-    try:
-        reopened.withdraw()
-        reopened.ser = app.ser
-        assert reopened.safety.locked
-        assert reopened._safety_window.winfo_exists()
-        assert "LOCKED" in reopened.safety_banner.cget("text")
-        assert str(reopened.safety_resume_button.cget("state")) == "disabled"
-        reopened._below_threshold_counts = [3] * 4
-        reopened._start_auto_watering()
-        assert not reopened._auto_watering_active
-        data = {**app.telemetry, **app._test_controller_status, "relays": "0000"}
-        reopened._receive_telemetry(data, [30] * 4)
-        assert str(reopened.safety_resume_button.cget("state")) == "normal"
-        reopened._resolve_safety()
-        assert reopened.safety.locked
-        reopened._receive_telemetry({**data, **app._test_controller_status}, [30] * 4)
-        assert not reopened.safety.locked
-        assert not reopened._auto_watering_active
-        assert reopened._below_threshold_counts == [0] * 4
-    finally:
-        reopened.destroy()
-
+    reopened = gui_app_factory()
+    reopened.withdraw()
+    reopened.ser = app.ser
+    assert reopened.safety.locked
+    assert reopened._safety_window.winfo_exists()
+    assert "LOCKED" in reopened.safety_banner.cget("text")
+    assert str(reopened.safety_resume_button.cget("state")) == "disabled"
+    reopened._below_threshold_counts = [3] * 4
+    reopened._start_auto_watering()
+    assert not reopened._auto_watering_active
+    data = {**app.telemetry, **app._test_controller_status, "relays": "0000"}
+    reopened._receive_telemetry(data, [30] * 4)
+    assert str(reopened.safety_resume_button.cget("state")) == "normal"
+    reopened._resolve_safety()
+    assert reopened.safety.locked
+    reopened._receive_telemetry({**data, **app._test_controller_status}, [30] * 4)
+    assert not reopened.safety.locked
+    assert not reopened._auto_watering_active
+    assert reopened._below_threshold_counts == [0] * 4
 
 def test_controller_rejected_reset_is_visible_and_remains_locked(watering):
     app, clock = watering

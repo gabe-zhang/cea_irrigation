@@ -1,6 +1,7 @@
 """Verify the diagnostic contract, retention, and failure isolation."""
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 import logging
 import os
@@ -46,13 +47,27 @@ def test_structured_exception_context_and_idempotence(tmp_path, capsys):
     assert entry["level"] == "ERROR"
     assert entry["context"] == {"channel": 2, "path": "sensor.csv", "values": [None, None]}
     assert "RuntimeError: sensor disconnected" in entry["exception"]
-    assert entry["timestamp"].endswith("+00:00")
+    assert entry["timestamp"].endswith(("-05:00", "-06:00"))
     assert entry["session_id"] == entries[0]["session_id"]
     assert entry["application"] == "gui"
     assert entry["thread"] == "MainThread"
     assert entry["source"].startswith("test_logging.py:")
     assert (root.level, list(root.handlers)) == root_state
     assert capsys.readouterr().err.count("[sensor.failed]") == 1
+
+
+@pytest.mark.parametrize("utc_timestamp, expected_timestamp, expected_console_time", [
+    ("2026-10-14T20:10:07.767+00:00", "2026-10-14T15:10:07.767-05:00", "15:10:07 CDT"),
+    ("2026-01-14T20:10:07.767+00:00", "2026-01-14T14:10:07.767-06:00", "14:10:07 CST"),
+    ("2026-11-01T06:30:00+00:00", "2026-11-01T01:30:00.000-05:00", "01:30:00 CDT"),
+    ("2026-11-01T07:30:00+00:00", "2026-11-01T01:30:00.000-06:00", "01:30:00 CST"),
+])
+def test_log_timestamps_use_chicago_time(utc_timestamp, expected_timestamp, expected_console_time):
+    record = logging.LogRecord(logger.name, logging.INFO, __file__, 1, "Test event", (), None)
+    record.created = datetime.fromisoformat(utc_timestamp).timestamp()
+
+    assert json.loads(config.JsonFormatter().format(record))["timestamp"] == expected_timestamp
+    assert config.ConsoleFormatter().format(record).startswith(expected_console_time + " INFO ")
 
 
 def test_environment_level_and_location(tmp_path, monkeypatch):
@@ -196,7 +211,9 @@ assert not list(Path('.').iterdir())
 """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
-    result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+    import_dir = tmp_path / "import"
+    import_dir.mkdir()
+    result = subprocess.run([sys.executable, "-c", script], cwd=import_dir, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 

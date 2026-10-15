@@ -1,6 +1,7 @@
 """Regression checks for sensor data supplied to live and historical plots."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+import gc
 import math
 import tkinter as tk
 
@@ -41,6 +42,26 @@ def plotter():
     yield plot
     plot.toggle(False)
     root.destroy()
+
+
+@pytest.mark.parametrize("transition", ["close", "historical", "restart"])
+def test_live_plot_draws_before_immediate_transition(plotter, transition, recwarn):
+    plotter.toggle(True)
+    # Initial telemetry must be visible without waiting for Tk's idle queue.
+    assert len(plotter.xdata) == 1
+    assert plotter.lines_moist[0].get_ydata()[0] == 40
+
+    if transition == "historical":
+        plotter.range_var.set("day")
+        assert plotter.ani is None
+    elif transition == "restart":
+        plotter._render_current_mode()
+        assert len(plotter.xdata) == 1
+    plotter.toggle(False)
+    plotter.master.update_idletasks()
+    gc.collect()
+    assert not [warning for warning in recwarn
+                if "Animation was deleted without rendering" in str(warning.message)]
 
 
 def test_live_light_legacy_tuples_and_sweep_reset(plotter):
@@ -125,7 +146,9 @@ def test_historical_axes_and_return_to_live(plotter, tmp_path, monkeypatch):
     plotter._update((1, [40], 22, 24, 58, 1200))
     plotter.range_var.set("day")
     plotter.range_var.set("min")
-    assert plotter.ydata_light == []
+    # Returning to live mode clears the old sweep and draws one fresh sample.
+    assert len(plotter.xdata) == 1
+    assert plotter.ydata_light == [1200]
     assert_sensor_axes(plotter)
     assert plotter.line_temp.get_markersize() == sizes["min"]
 
@@ -147,7 +170,7 @@ def test_range_bounds_and_labels_share_rolling_policy(tmp_path):
 
 @pytest.mark.parametrize("mode", ["week", "month", "period"])
 @pytest.mark.parametrize("now", [datetime(2026, 10, 5, 16, 50, 37), datetime(2028, 3, 1)])
-def test_historical_date_ticks_start_at_range_boundary(plotter, tmp_path, monkeypatch, mode, now):
+def test_historical_date_ticks_align_to_midnight(plotter, tmp_path, monkeypatch, mode, now):
     class FrozenDatetime(datetime):
         @classmethod
         def now(cls):
@@ -165,10 +188,34 @@ def test_historical_date_ticks_start_at_range_boundary(plotter, tmp_path, monkey
 
     plotter._render_historical_figure(mode)
 
+    first_midnight = datetime.combine(first.date(), datetime.min.time())
+    if first_midnight < first:
+        first_midnight += timedelta(days=1)
     for axis in (plotter.ax_temp, plotter.ax_moist):
         assert axis.get_xlim() == pytest.approx(gui.mdates.date2num([first, last]), rel=0, abs=1e-9)
         ticks = axis.get_xticks()
-        assert ticks[0] == pytest.approx(gui.mdates.date2num(first), rel=0, abs=1e-9)
+        assert ticks[0] == pytest.approx(gui.mdates.date2num(first_midnight), rel=0, abs=1e-9)
         assert all(axis.get_xlim()[0] <= tick <= axis.get_xlim()[1] for tick in ticks)
-        assert axis.xaxis.get_major_formatter()(ticks[0]) == gui.visible_date(first)
+        assert all(gui.mdates.num2date(tick).time() == datetime.min.time() for tick in ticks)
+        assert all(ticks[i + 1] - ticks[i] == pytest.approx(1 if mode == "week" else 5)
+                   for i in range(len(ticks) - 1))
+        assert axis.xaxis.get_major_formatter()(ticks[0]) == gui.visible_date(first_midnight)
     assert gui.visible_date(first) in plotter.fig._suptitle.get_text()
+
+
+@pytest.mark.parametrize("mode", ["day", "period"])
+def test_single_day_ticks_use_the_same_four_hour_marks(plotter, tmp_path, monkeypatch, mode):
+    today = date.today()
+    monkeypatch.setattr(gui, "TELEMETRY_DIR", tmp_path)
+    plotter.start_date_var = lambda: today
+    plotter.end_date_var = lambda: today
+    (tmp_path / "telemetry_ticks.csv").write_text(
+        HEADER + f"{today} 00:00:00,400,400,400,400,40,41,42,43,22,24,58,0,0000,55,30\n"
+    )
+    plotter._render_historical_figure(mode)
+
+    for axis in (plotter.ax_temp, plotter.ax_moist):
+        ticks = axis.get_xticks()
+        assert [axis.xaxis.get_major_formatter()(tick) for tick in ticks] == [
+            "00:00", "04:00", "08:00", "12:00", "16:00", "20:00",
+        ]
